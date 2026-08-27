@@ -379,6 +379,10 @@ function Repair-PauseStateForCurrentDay {
         }
     }
 
+    if ($State.PSObject.Properties.Name -contains "PauseIntervals") {
+        $State.PauseIntervals = @(Merge-PauseIntervals -Intervals $State.PauseIntervals)
+    }
+
     return $State
 }
 
@@ -427,11 +431,86 @@ function Get-PauseIntervalDateTime {
     }
 
     try {
-        return [datetime]::Parse([string]$Interval.$Name)
+        $value = $Interval.$Name
+
+        if ($value -is [datetime]) {
+            return [datetime]$value
+        }
+
+        return [datetime]::Parse(
+            [string]$value,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        )
     }
     catch {
         return $null
     }
+}
+
+function Merge-PauseIntervals {
+    param(
+        $Intervals
+    )
+
+    $parsed = @()
+
+    foreach ($interval in @($Intervals)) {
+        if ($null -eq $interval) {
+            continue
+        }
+
+        $start = Get-PauseIntervalDateTime -Interval $interval -Name "Start"
+        $end = Get-PauseIntervalDateTime -Interval $interval -Name "End"
+
+        if ($null -eq $start -or $null -eq $end -or $end -le $start) {
+            continue
+        }
+
+        $parsed += [PSCustomObject][ordered]@{
+            Kind  = if ($interval.PSObject.Properties.Name -contains "Kind") { [string]$interval.Kind } else { "Manual" }
+            Key   = if ($interval.PSObject.Properties.Name -contains "Key") { [string]$interval.Key } else { "Manual" }
+            Label = if ($interval.PSObject.Properties.Name -contains "Label") { [string]$interval.Label } else { "Manuell" }
+            Start = $start
+            End   = $end
+        }
+    }
+
+    $parsed = @($parsed | Sort-Object Start, End)
+    $merged = @()
+
+    foreach ($interval in $parsed) {
+        $last = $merged | Select-Object -Last 1
+        $sameCategory = $null -ne $last -and
+            [string]$last.Kind -eq [string]$interval.Kind -and
+            [string]$last.Key -eq [string]$interval.Key
+
+        if ($sameCategory -and $interval.Start -le $last.End.AddSeconds(1)) {
+            if ($interval.End -gt $last.End) {
+                $last.End = $interval.End
+            }
+
+            continue
+        }
+
+        $merged += [PSCustomObject][ordered]@{
+            Kind  = [string]$interval.Kind
+            Key   = [string]$interval.Key
+            Label = [string]$interval.Label
+            Start = $interval.Start
+            End   = $interval.End
+        }
+    }
+
+    return @($merged | ForEach-Object {
+        [PSCustomObject][ordered]@{
+            Kind  = [string]$_.Kind
+            Key   = [string]$_.Key
+            Label = [string]$_.Label
+            Start = $_.Start.ToString("o")
+            End   = $_.End.ToString("o")
+        }
+    })
 }
 
 function Add-PauseInterval {
@@ -450,36 +529,15 @@ function Add-PauseInterval {
 
     $State = Ensure-Property -Object $State -Name "PauseIntervals" -Value @()
     $intervals = @($State.PauseIntervals | Where-Object { $null -ne $_ })
-    $last = $intervals | Select-Object -Last 1
-    $canMerge = $false
-
-    if ($null -ne $last) {
-        $lastEnd = Get-PauseIntervalDateTime -Interval $last -Name "End"
-        $lastKind = if ($last.PSObject.Properties.Name -contains "Kind") { [string]$last.Kind } else { "" }
-        $lastKey = if ($last.PSObject.Properties.Name -contains "Key") { [string]$last.Key } else { "" }
-
-        $canMerge = $null -ne $lastEnd -and
-            $lastKind -eq $Kind -and
-            $lastKey -eq $Key -and
-            $From -le $lastEnd.AddSeconds(1)
+    $intervals += [PSCustomObject][ordered]@{
+        Kind  = $Kind
+        Key   = $Key
+        Label = $Label
+        Start = $From.ToString("o")
+        End   = $To.ToString("o")
     }
 
-    if ($canMerge) {
-        if ($To -gt $lastEnd) {
-            $last.End = $To.ToString("o")
-        }
-    }
-    else {
-        $intervals += [PSCustomObject][ordered]@{
-            Kind  = $Kind
-            Key   = $Key
-            Label = $Label
-            Start = $From.ToString("o")
-            End   = $To.ToString("o")
-        }
-    }
-
-    $State.PauseIntervals = @($intervals)
+    $State.PauseIntervals = @(Merge-PauseIntervals -Intervals $intervals)
     return $State
 }
 
@@ -897,7 +955,15 @@ function Apply-CorrectedPauseIntervals {
         }
     }
 
-    $normalized = @($normalized | Sort-Object Start, End)
+    $normalized = @(Merge-PauseIntervals -Intervals $normalized | ForEach-Object {
+        [PSCustomObject][ordered]@{
+            Kind  = [string]$_.Kind
+            Key   = [string]$_.Key
+            Label = [string]$_.Label
+            Start = Get-PauseIntervalDateTime -Interval $_ -Name "Start"
+            End   = Get-PauseIntervalDateTime -Interval $_ -Name "End"
+        }
+    })
 
     for ($index = 1; $index -lt $normalized.Count; $index++) {
         if ($normalized[$index].Start -lt $normalized[$index - 1].End) {

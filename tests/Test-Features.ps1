@@ -126,6 +126,7 @@ Import-FunctionsFromFile -Path $trackerPath -Names @(
     "Get-OffsetStartDateTime",
     "Ensure-Property",
     "Get-PauseIntervalDateTime",
+    "Merge-PauseIntervals",
     "Add-PauseInterval",
     "Format-PauseIntervals",
     "ConvertFrom-PauseIntervalsText",
@@ -133,6 +134,7 @@ Import-FunctionsFromFile -Path $trackerPath -Names @(
     "Get-WorkDate",
     "Get-TodayDateTime",
     "Ensure-PauseStateProperties",
+    "Repair-PauseStateForCurrentDay",
     "Get-AutoPauseSeconds",
     "Get-PauseCsvColumnName",
     "Get-EditedPauseCountedUntil",
@@ -158,6 +160,21 @@ Assert-Equal "09:01-09:12 (Frühstück)" $pauseText "Absolute Pausenzeit wird le
 $importedIntervals = @(ConvertFrom-PauseIntervalsText -Text "9:01-9:12 (Frühstück)" -Date ([datetime]"2026-08-27"))
 Assert-Equal 1 $importedIntervals.Count "Pausenzeiten mit einstelliger Stunde sind lesbar"
 
+$duplicateIntervals = @(
+    [PSCustomObject]@{ Kind = "Auto"; Key = "Morning"; Label = "Frühstück"; Start = "2026-08-27T09:06:00"; End = "2026-08-27T09:15:00" },
+    [PSCustomObject]@{ Kind = "Auto"; Key = "Morning"; Label = "Frühstück"; Start = "2026-08-27T09:15:00"; End = "2026-08-27T09:28:00" }
+)
+$mergedDuplicates = @(Merge-PauseIntervals -Intervals $duplicateIntervals)
+Assert-Equal 1 $mergedDuplicates.Count "Direkt angrenzende Pausen derselben Kategorie werden zusammengeführt"
+Assert-Equal "09:06" ([datetime]$mergedDuplicates[0].Start).ToString("HH:mm") "Zusammengeführte Pause behält den ersten Beginn"
+Assert-Equal "09:28" ([datetime]$mergedDuplicates[0].End).ToString("HH:mm") "Zusammengeführte Pause behält das letzte Ende"
+
+$differentCategories = @(
+    $duplicateIntervals[0],
+    [PSCustomObject]@{ Kind = "Manual"; Key = "Manual"; Label = "Manuell"; Start = "2026-08-27T09:15:00"; End = "2026-08-27T09:28:00" }
+)
+Assert-Equal 2 @(Merge-PauseIntervals -Intervals $differentCategories).Count "Angrenzende Pausen verschiedener Kategorien bleiben getrennt"
+
 $correctionState = [PSCustomObject]@{
     Date                     = "2026-08-27"
     PauseMorningSeconds      = 1200
@@ -182,6 +199,32 @@ Assert-Equal 660 ([double]$corrected.PauseMorningSeconds) "Automatische Pausenda
 Assert-Equal 0 ([double]$corrected.PauseNoonSeconds) "Entfernte Pausenzeiträume werden auf null gesetzt"
 Assert-Equal 900 ([double]$corrected.ManualPauseSeconds) "Manuelle Pausendauer wird aus Von-bis berechnet"
 Assert-Equal 2 @($corrected.PauseIntervals).Count "Korrigierte Von-bis-Zeiträume werden gespeichert"
+
+$adjacentCorrectionState = [PSCustomObject]@{
+    Date                     = "2026-08-27"
+    PauseMorningSeconds      = 1320
+    PauseNoonSeconds         = 0
+    ManualPauseSeconds       = 0
+    PauseMorningCountedUntil = "2026-08-27T09:28:00"
+    PauseNoonCountedUntil    = ""
+    ManualPauseActive        = $false
+    ManualPauseStartedAt     = ""
+    ManualPauseCountedUntil  = ""
+    PauseIntervals           = @($duplicateIntervals)
+}
+$repairedAdjacentState = Repair-PauseStateForCurrentDay -State $adjacentCorrectionState -Settings (New-ArbeitszeitDefaultSettings)
+Assert-Equal 1 @($repairedAdjacentState.PauseIntervals).Count "Bestehende doppelte Zeitpunkte werden automatisch repariert"
+
+$savedAdjacentState = Apply-CorrectedPauseIntervals `
+    -State $adjacentCorrectionState `
+    -Intervals @(
+        [PSCustomObject]@{ Kind = "Auto"; Key = "Morning"; Label = "Frühstück"; Start = "09:06"; End = "09:15" },
+        [PSCustomObject]@{ Kind = "Auto"; Key = "Morning"; Label = "Frühstück"; Start = "09:15"; End = "09:28" }
+    ) `
+    -Now ([datetime]"2026-08-27T16:00:00") `
+    -Settings (New-ArbeitszeitDefaultSettings)
+Assert-Equal 1 @($savedAdjacentState.PauseIntervals).Count "Angrenzende Pausen werden auch beim Korrigieren als ein Zeitraum gespeichert"
+Assert-Equal 1320 ([double]$savedAdjacentState.PauseMorningSeconds) "Zusammenführen verändert die Pausendauer nicht"
 
 $overlapState = [PSCustomObject]@{
     Date                     = "2026-08-27"
@@ -461,8 +504,25 @@ Import-FunctionsFromFile -Path $displayPath -Names @(
     "Get-ThemePalette",
     "New-Brush",
     "Get-BrushText",
-    "Apply-ThemeRecursive"
+    "Apply-ThemeRecursive",
+    "Merge-PauseIntervals",
+    "Set-CorrectionInputAppearance"
 )
+
+$correctionTimeBox = New-Object System.Windows.Controls.TextBox
+Set-CorrectionInputAppearance -Control $correctionTimeBox -TimeMaxLength 5
+Assert-True -Condition (-not $correctionTimeBox.IsReadOnly) -Message "Zeitfelder im Korrekturfenster sind tatsächlich editierbar"
+Assert-Equal 5 $correctionTimeBox.MaxLength "Pausenzeiten akzeptieren das Format HH:mm"
+Assert-Equal "#FFFFFF" (Convert-BrushToHex $correctionTimeBox.Background) "Zeitfelder besitzen eine eindeutig erkennbare Eingabefläche"
+Assert-Equal "#1C1C1E" (Convert-BrushToHex $correctionTimeBox.Foreground) "Zeitfelder besitzen dunkle Schrift"
+Assert-Equal "#1C1C1E" (Convert-BrushToHex $correctionTimeBox.CaretBrush) "Der Cursor im Zeitfeld bleibt sichtbar"
+
+$correctionCategoryBox = New-Object System.Windows.Controls.ComboBox
+Set-CorrectionInputAppearance -Control $correctionCategoryBox
+$categoryRatio = Get-ContrastRatio -FirstColor (Convert-BrushToHex $correctionCategoryBox.Background) -SecondColor (Convert-BrushToHex $correctionCategoryBox.Foreground)
+Assert-True -Condition ($categoryRatio -ge 4.5) -Message "Kategorie-Auswahl besitzt auch im Darkmode ausreichenden Kontrast"
+Assert-True -Condition ($null -ne $correctionCategoryBox.ItemContainerStyle) -Message "Einträge der Kategorie-Auswahl erhalten explizite lesbare Farben"
+
 $dialogStylesReader = New-Object System.Xml.XmlNodeReader $dialogStylesXml
 $dialogResources = [System.Windows.Markup.XamlReader]::Load($dialogStylesReader)
 Assert-True -Condition $true -Message "Dialog-Styles lassen sich von WPF laden"

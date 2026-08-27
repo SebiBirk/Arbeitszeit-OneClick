@@ -232,11 +232,78 @@ function Get-PauseIntervalDateTime {
     }
 
     try {
-        return [datetime]::Parse([string]$Interval.$Name)
+        $value = $Interval.$Name
+
+        if ($value -is [datetime]) {
+            return [datetime]$value
+        }
+
+        return [datetime]::Parse(
+            [string]$value,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        )
     }
     catch {
         return $null
     }
+}
+
+function Merge-PauseIntervals {
+    param(
+        $Intervals
+    )
+
+    $parsed = @()
+
+    foreach ($interval in @($Intervals)) {
+        if ($null -eq $interval) {
+            continue
+        }
+
+        $start = Get-PauseIntervalDateTime -Interval $interval -Name "Start"
+        $end = Get-PauseIntervalDateTime -Interval $interval -Name "End"
+
+        if ($null -eq $start -or $null -eq $end -or $end -le $start) {
+            continue
+        }
+
+        $parsed += [PSCustomObject][ordered]@{
+            Kind  = if ($interval.PSObject.Properties.Name -contains "Kind") { [string]$interval.Kind } else { "Manual" }
+            Key   = if ($interval.PSObject.Properties.Name -contains "Key") { [string]$interval.Key } else { "Manual" }
+            Label = if ($interval.PSObject.Properties.Name -contains "Label") { [string]$interval.Label } else { "Manuell" }
+            Start = $start
+            End   = $end
+        }
+    }
+
+    $parsed = @($parsed | Sort-Object Start, End)
+    $merged = @()
+
+    foreach ($interval in $parsed) {
+        $last = $merged | Select-Object -Last 1
+        $sameCategory = $null -ne $last -and
+            [string]$last.Kind -eq [string]$interval.Kind -and
+            [string]$last.Key -eq [string]$interval.Key
+
+        if ($sameCategory -and $interval.Start -le $last.End.AddSeconds(1)) {
+            if ($interval.End -gt $last.End) {
+                $last.End = $interval.End
+            }
+
+            continue
+        }
+
+        $merged += [PSCustomObject][ordered]@{
+            Kind  = [string]$interval.Kind
+            Key   = [string]$interval.Key
+            Label = [string]$interval.Label
+            Start = $interval.Start.ToString("o")
+            End   = $interval.End.ToString("o")
+        }
+    }
+
+    return @($merged)
 }
 
 function Format-PauseIntervals {
@@ -246,7 +313,7 @@ function Format-PauseIntervals {
 
     $parts = @()
 
-    foreach ($interval in @($Intervals)) {
+    foreach ($interval in @(Merge-PauseIntervals -Intervals $Intervals)) {
         $start = Get-PauseIntervalDateTime -Interval $interval -Name "Start"
         $end = Get-PauseIntervalDateTime -Interval $interval -Name "End"
 
@@ -983,7 +1050,8 @@ function Get-LiveValues {
 function Write-ControlCommand {
     param(
         [string]$Action,
-        $Values = $null
+        $Values = $null,
+        [switch]$PassThru
     )
 
     $id = [guid]::NewGuid().ToString()
@@ -1001,6 +1069,32 @@ function Write-ControlCommand {
         Set-Content -LiteralPath $tmpPath -Encoding UTF8
 
     Move-Item -LiteralPath $tmpPath -Destination $ControlPath -Force
+
+    if ($PassThru) {
+        return $id
+    }
+}
+
+function Wait-ControlCommandApplied {
+    param(
+        [string]$Id,
+        [int]$TimeoutSeconds = 10
+    )
+
+    $deadline = (Get-Date).AddSeconds([math]::Max(1, $TimeoutSeconds))
+
+    do {
+        $state = Read-State
+
+        if ($null -ne $state -and [string]$state.LastControlId -eq $Id) {
+            return $true
+        }
+
+        Start-Sleep -Milliseconds 100
+    }
+    while ((Get-Date) -lt $deadline)
+
+    return $false
 }
 
 function Show-Info {
@@ -1813,6 +1907,39 @@ function Apply-DialogButtonStyles {
     }
 }
 
+function Set-CorrectionInputAppearance {
+    param(
+        $Control,
+        [int]$TimeMaxLength = 0
+    )
+
+    if ($null -eq $Control) {
+        return
+    }
+
+    $Control.Background = New-Brush "#FFFFFF"
+    $Control.Foreground = New-Brush "#1C1C1E"
+    $Control.BorderBrush = New-Brush "#8E8E93"
+
+    if ($Control -is [System.Windows.Controls.TextBox]) {
+        $Control.CaretBrush = New-Brush "#1C1C1E"
+        $Control.SelectionBrush = New-Brush "#007AFF"
+        $Control.SelectionTextBrush = New-Brush "#FFFFFF"
+
+        if ($TimeMaxLength -gt 0) {
+            $Control.IsReadOnly = $false
+            $Control.MaxLength = $TimeMaxLength
+            $Control.Cursor = [System.Windows.Input.Cursors]::IBeam
+        }
+    }
+    elseif ($Control -is [System.Windows.Controls.ComboBox]) {
+        $itemStyle = New-Object System.Windows.Style -ArgumentList ([System.Windows.Controls.ComboBoxItem])
+        $itemStyle.Setters.Add((New-Object System.Windows.Setter -ArgumentList ([System.Windows.Controls.Control]::BackgroundProperty), (New-Brush "#FFFFFF"))) | Out-Null
+        $itemStyle.Setters.Add((New-Object System.Windows.Setter -ArgumentList ([System.Windows.Controls.Control]::ForegroundProperty), (New-Brush "#1C1C1E"))) | Out-Null
+        $Control.ItemContainerStyle = $itemStyle
+    }
+}
+
 function Open-CorrectionWindow {
     param(
         $Owner
@@ -1843,6 +1970,8 @@ function Open-CorrectionWindow {
     if ($existingIntervals.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$values.PauseIntervalsText)) {
         $existingIntervals = @(ConvertFrom-PauseIntervalsText -Text ([string]$values.PauseIntervalsText) -Date $workDate)
     }
+
+    $existingIntervals = @(Merge-PauseIntervals -Intervals $existingIntervals)
 
     $pauseOptions = @(
         [PSCustomObject][ordered]@{
@@ -1902,7 +2031,7 @@ function Open-CorrectionWindow {
                         </Grid.ColumnDefinitions>
                         <StackPanel>
                             <TextBlock Text="Pausenzeiten" FontSize="19" FontWeight="SemiBold" Foreground="$($palette.Primary)"/>
-                            <TextBlock Text="Jede Pause wird mit Kategorie, Von und Bis gespeichert." Margin="0,4,0,0" Foreground="$($palette.Secondary)" FontSize="12"/>
+                            <TextBlock Text="Zeitfeld anklicken, vorhandenen Wert überschreiben und als HH:mm eingeben." Margin="0,4,0,0" Foreground="$($palette.Secondary)" FontSize="12"/>
                         </StackPanel>
                         <Border Grid.Column="1" Background="$($palette.Soft)" CornerRadius="13" Padding="12,7" VerticalAlignment="Center">
                             <TextBlock x:Name="PauseSummaryText" Text="00:00 Pause" Foreground="$($palette.Primary)" FontWeight="SemiBold" FontSize="12"/>
@@ -1976,14 +2105,11 @@ function Open-CorrectionWindow {
     $pauseSummaryText = $dialog.FindName("PauseSummaryText")
     $addPauseButton = $dialog.FindName("AddPauseButton")
     $iconButtonStyle = $dialog.Resources["DialogIconButton"]
-
     $addPauseButton.Style = $dialog.Resources["DialogSecondaryButton"]
 
     foreach ($name in @("StartBox", "NoteBox")) {
         $textBox = $dialog.FindName($name)
-        $textBox.Background = New-Brush $palette.Soft
-        $textBox.Foreground = New-Brush $palette.Primary
-        $textBox.BorderBrush = New-Brush $palette.Border
+        Set-CorrectionInputAppearance -Control $textBox -TimeMaxLength $(if ($name -eq "StartBox") { 8 } else { 0 })
     }
 
     function Update-CorrectionPauseState {
@@ -2053,9 +2179,7 @@ function Open-CorrectionWindow {
         $categoryBox = New-Object System.Windows.Controls.ComboBox
         $categoryBox.DisplayMemberPath = "Label"
         $categoryBox.Margin = New-Object System.Windows.Thickness -ArgumentList 0, 0, 10, 0
-        $categoryBox.Background = New-Brush $palette.Card
-        $categoryBox.Foreground = New-Brush $palette.Primary
-        $categoryBox.BorderBrush = New-Brush $palette.Border
+        Set-CorrectionInputAppearance -Control $categoryBox
         $categoryBox.ToolTip = "Art der Pause"
 
         foreach ($option in $pauseOptions) {
@@ -2073,9 +2197,7 @@ function Open-CorrectionWindow {
         $startBox = New-Object System.Windows.Controls.TextBox
         $startBox.Text = [string]$Interval.Start
         $startBox.Margin = New-Object System.Windows.Thickness -ArgumentList 0, 0, 10, 0
-        $startBox.Background = New-Brush $palette.Card
-        $startBox.Foreground = New-Brush $palette.Primary
-        $startBox.BorderBrush = New-Brush $palette.Border
+        Set-CorrectionInputAppearance -Control $startBox -TimeMaxLength 5
         $startBox.TextAlignment = [System.Windows.TextAlignment]::Center
         $startBox.ToolTip = "Beginn im Format HH:mm"
         [System.Windows.Controls.Grid]::SetColumn($startBox, 1)
@@ -2084,9 +2206,7 @@ function Open-CorrectionWindow {
         $endBox = New-Object System.Windows.Controls.TextBox
         $endBox.Text = [string]$Interval.End
         $endBox.Margin = New-Object System.Windows.Thickness -ArgumentList 0, 0, 8, 0
-        $endBox.Background = New-Brush $palette.Card
-        $endBox.Foreground = New-Brush $palette.Primary
-        $endBox.BorderBrush = New-Brush $palette.Border
+        Set-CorrectionInputAppearance -Control $endBox -TimeMaxLength 5
         $endBox.TextAlignment = [System.Windows.TextAlignment]::Center
         $endBox.ToolTip = "Ende im Format HH:mm"
         [System.Windows.Controls.Grid]::SetColumn($endBox, 2)
@@ -2119,6 +2239,8 @@ function Open-CorrectionWindow {
 
         $startBox.Add_TextChanged({ Update-CorrectionPauseState })
         $endBox.Add_TextChanged({ Update-CorrectionPauseState })
+        $startBox.Add_GotKeyboardFocus({ param($sender, $eventArgs) $sender.SelectAll() })
+        $endBox.Add_GotKeyboardFocus({ param($sender, $eventArgs) $sender.SelectAll() })
 
         $pauseRows.Add($rowInfo) | Out-Null
         $pauseListPanel.Children.Add($container) | Out-Null
@@ -2159,7 +2281,9 @@ function Open-CorrectionWindow {
             -SelectedOption $selectedOption
     }
 
-    $dialog.FindName("StartBox").Text = $values.StartTime
+    $workStartBox = $dialog.FindName("StartBox")
+    $workStartBox.Text = $values.StartTime
+    $workStartBox.Add_GotKeyboardFocus({ param($sender, $eventArgs) $sender.SelectAll() })
     $dialog.FindName("NoteBox").Text = [string]$values.Note
 
     if ($pauseRows.Count -eq 0 -and [double]$values.TotalPauseSeconds -gt 0) {
@@ -2187,6 +2311,8 @@ function Open-CorrectionWindow {
     })
 
     $dialog.FindName("SaveButton").Add_Click({
+        param($sender, $eventArgs)
+
         $startTime = Convert-ToTimeText $dialog.FindName("StartBox").Text
 
         if ([string]::IsNullOrWhiteSpace($startTime)) {
@@ -2275,8 +2401,27 @@ function Open-CorrectionWindow {
             Note          = $dialog.FindName("NoteBox").Text
         }
 
-        Write-ControlCommand -Action "UpdateToday" -Values $commandValues
-        $dialog.Close()
+        $sender.Content = "Speichert..."
+        $sender.IsEnabled = $false
+        $dialog.UpdateLayout()
+
+        try {
+            $commandId = Write-ControlCommand -Action "UpdateToday" -Values $commandValues -PassThru
+            $timeoutSeconds = [math]::Min(65, [math]::Max(5, ([int]$settings.IntervalSeconds + 3)))
+
+            if (Wait-ControlCommandApplied -Id $commandId -TimeoutSeconds $timeoutSeconds) {
+                $dialog.Close()
+                return
+            }
+
+            Show-Warning "Die Änderung wurde gesendet, aber der Tracker hat sie noch nicht bestätigt. Bitte prüfen, ob die Arbeitszeiterfassung läuft."
+        }
+        catch {
+            Show-Warning ("Die Änderung konnte nicht gespeichert werden: " + $_.Exception.Message)
+        }
+
+        $sender.Content = "Speichern"
+        $sender.IsEnabled = $true
     })
 
     $dialog.ShowDialog() | Out-Null
