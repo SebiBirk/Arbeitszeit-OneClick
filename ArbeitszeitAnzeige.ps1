@@ -1711,27 +1711,33 @@ $dialogStyles = @"
         <Setter Property="Padding" Value="18,0"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Foreground" Value="White"/>
-        <Setter Property="Background" Value="#007AFF"/>
-        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Background" Value="#005BBB"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="2"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border x:Name="Root" Background="{TemplateBinding Background}" CornerRadius="18">
+                    <Border x:Name="Root"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="18">
                         <ContentPresenter HorizontalAlignment="Center"
                                           VerticalAlignment="Center"
                                           TextElement.Foreground="{TemplateBinding Foreground}"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Root" Property="Opacity" Value="0.88"/>
+                            <Setter TargetName="Root" Property="BorderBrush" Value="#801C1C1E"/>
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Root" Property="Opacity" Value="0.72"/>
+                            <Setter TargetName="Root" Property="BorderBrush" Value="#CC1C1C1E"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="Root" Property="Background" Value="#E5E5EA"/>
-                            <Setter Property="Foreground" Value="#6E6E73"/>
+                            <Setter TargetName="Root" Property="Background" Value="#D7D7DC"/>
+                            <Setter TargetName="Root" Property="BorderBrush" Value="#D7D7DC"/>
+                            <Setter Property="Foreground" Value="#4A4A4F"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -1739,7 +1745,7 @@ $dialogStyles = @"
         </Setter>
     </Style>
     <Style x:Key="DialogSecondaryButton" TargetType="Button" BasedOn="{StaticResource DialogButton}">
-        <Setter Property="Background" Value="#E5E5EA"/>
+        <Setter Property="Background" Value="#E4E4EA"/>
         <Setter Property="Foreground" Value="#1C1C1E"/>
     </Style>
     <Style x:Key="DialogIconButton" TargetType="Button" BasedOn="{StaticResource DialogButton}">
@@ -1747,7 +1753,7 @@ $dialogStyles = @"
         <Setter Property="MinWidth" Value="36"/>
         <Setter Property="Height" Value="34"/>
         <Setter Property="Padding" Value="0"/>
-        <Setter Property="Background" Value="#FF3B30"/>
+        <Setter Property="Background" Value="#B42318"/>
         <Setter Property="Foreground" Value="White"/>
     </Style>
     <Style TargetType="TextBox">
@@ -2380,7 +2386,8 @@ function Open-SettingsWindow {
 
     $pauseRows = New-Object System.Collections.ArrayList
     $pauseListPanel = $dialog.FindName("PauseListPanel")
-    $buttonStyle = $dialog.Resources["DialogButton"]
+    $secondaryButtonStyle = $dialog.Resources["DialogSecondaryButton"]
+    $iconButtonStyle = $dialog.Resources["DialogIconButton"]
 
     function Add-PauseRow {
         param(
@@ -2434,14 +2441,11 @@ function Open-SettingsWindow {
         $grid.Children.Add($endBox) | Out-Null
 
         $removeButton = New-Object System.Windows.Controls.Button
-        $removeButton.Content = "X"
-        $removeButton.Height = 30
-        $removeButton.MinWidth = 36
-        $removeButton.Background = New-Object System.Windows.Media.SolidColorBrush -ArgumentList ([System.Windows.Media.Color]::FromRgb(142, 142, 147))
-        $removeButton.Foreground = [System.Windows.Media.Brushes]::White
+        $removeButton.Content = [char]0x00D7
+        $removeButton.ToolTip = "Pausenfenster entfernen"
 
-        if ($null -ne $buttonStyle) {
-            $removeButton.Style = $buttonStyle
+        if ($null -ne $iconButtonStyle) {
+            $removeButton.Style = $iconButtonStyle
         }
 
         $removeButton.Visibility = if ($CanRemove) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Hidden }
@@ -2472,7 +2476,7 @@ function Open-SettingsWindow {
     }
 
     $addPauseButton = $dialog.FindName("AddPauseButton")
-    $addPauseButton.Style = $buttonStyle
+    $addPauseButton.Style = $secondaryButtonStyle
     $addPauseButton.Add_Click({
         $newPause = [PSCustomObject][ordered]@{
             Key     = ""
@@ -2706,7 +2710,7 @@ function Open-WeekWindow {
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
                 <Button x:Name="ExportButton" Content="PDF" Margin="0,0,10,0"/>
-                <Button x:Name="CloseButton" Content="Schließen" Background="#8E8E93"/>
+                <Button x:Name="CloseButton" Content="Schließen"/>
             </StackPanel>
         </StackPanel>
     </ScrollViewer>
@@ -2724,9 +2728,8 @@ function Open-WeekWindow {
         catch {}
     }
 
-    $buttonStyle = $dialog.Resources["DialogButton"]
-    $dialog.FindName("ExportButton").Style = $buttonStyle
-    $dialog.FindName("CloseButton").Style = $buttonStyle
+    $dialog.FindName("ExportButton").Style = $dialog.Resources["DialogButton"]
+    $dialog.FindName("CloseButton").Style = $dialog.Resources["DialogSecondaryButton"]
 
     $timelineBar = $dialog.FindName("TimelineBar")
     $segments = @(
@@ -2837,32 +2840,58 @@ $mainXaml = @"
             <Setter Property="Padding" Value="16,0"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Background" Value="#007AFF"/>
-            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="#005BBB"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="2"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="Root" Background="{TemplateBinding Background}" CornerRadius="20">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="20">
                             <ContentPresenter HorizontalAlignment="Center"
                                               VerticalAlignment="Center"
                                               TextElement.Foreground="{TemplateBinding Foreground}"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Root" Property="Opacity" Value="0.88"/>
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#80FFFFFF"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Root" Property="Opacity" Value="0.74"/>
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#CCFFFFFF"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Root" Property="Background" Value="#E5E5EA"/>
-                                <Setter Property="Foreground" Value="#8E8E93"/>
+                                <Setter TargetName="Root" Property="Background" Value="#D7D7DC"/>
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#D7D7DC"/>
+                                <Setter Property="Foreground" Value="#4A4A4F"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+        </Style>
+        <Style x:Key="PillSuccessButton" TargetType="Button" BasedOn="{StaticResource PillButton}">
+            <Setter Property="Background" Value="#1F7A3D"/>
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+        <Style x:Key="PillDarkButton" TargetType="Button" BasedOn="{StaticResource PillButton}">
+            <Setter Property="Background" Value="#3A3A3C"/>
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+        <Style x:Key="PillPurpleButton" TargetType="Button" BasedOn="{StaticResource PillButton}">
+            <Setter Property="Background" Value="#5145CD"/>
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+        <Style x:Key="PillSurfaceButton" TargetType="Button" BasedOn="{StaticResource PillButton}">
+            <Setter Property="Background" Value="#E4E4EA"/>
+            <Setter Property="Foreground" Value="#1C1C1E"/>
+        </Style>
+        <Style x:Key="PillDangerButton" TargetType="Button" BasedOn="{StaticResource PillButton}">
+            <Setter Property="Background" Value="#B42318"/>
+            <Setter Property="Foreground" Value="White"/>
         </Style>
     </Window.Resources>
 
@@ -2895,7 +2924,7 @@ $mainXaml = @"
                 </Grid.ColumnDefinitions>
 
                 <TextBlock Text="NETTO HEUTE" Foreground="#6E6E73" FontSize="12" FontWeight="SemiBold"/>
-                <Button x:Name="SetupButton" Grid.Column="1" Content="Setup" Style="{StaticResource PillButton}" Background="#F2F2F7" Foreground="#1C1C1E" Height="34"/>
+                <Button x:Name="SetupButton" Grid.Column="1" Content="Setup" Style="{StaticResource PillSurfaceButton}" Height="34"/>
 
                 <TextBlock x:Name="NetText" Grid.Row="1" Grid.ColumnSpan="2" Text="00:00:00" FontSize="44" FontWeight="SemiBold" Foreground="#1C1C1E" VerticalAlignment="Center"/>
 
@@ -2957,12 +2986,12 @@ $mainXaml = @"
                 <ColumnDefinition Width="8"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <Button x:Name="PauseButton" Grid.Column="0" Content="Pause" Style="{StaticResource PillButton}" Background="#007AFF"/>
-            <Button x:Name="ResumeButton" Grid.Column="2" Content="Weiter" Style="{StaticResource PillButton}" Background="#34C759"/>
-            <Button x:Name="EditButton" Grid.Column="4" Content="Korrigieren" Style="{StaticResource PillButton}" Background="#3A3A3C"/>
-            <Button x:Name="CsvButton" Grid.Column="6" Content="CSV" Style="{StaticResource PillButton}" Background="#3A3A3C"/>
-            <Button x:Name="WeekButton" Grid.Column="8" Content="Bericht" Style="{StaticResource PillButton}" Background="#5856D6"/>
-            <Button x:Name="ThemeButton" Grid.Column="10" Content="Dark" Style="{StaticResource PillButton}" Background="#3A3A3C"/>
+            <Button x:Name="PauseButton" Grid.Column="0" Content="Pause" Style="{StaticResource PillButton}"/>
+            <Button x:Name="ResumeButton" Grid.Column="2" Content="Weiter" Style="{StaticResource PillSuccessButton}"/>
+            <Button x:Name="EditButton" Grid.Column="4" Content="Korrigieren" Style="{StaticResource PillDarkButton}"/>
+            <Button x:Name="CsvButton" Grid.Column="6" Content="CSV" Style="{StaticResource PillDarkButton}"/>
+            <Button x:Name="WeekButton" Grid.Column="8" Content="Bericht" Style="{StaticResource PillPurpleButton}"/>
+            <Button x:Name="ThemeButton" Grid.Column="10" Content="Dark" Style="{StaticResource PillDarkButton}"/>
         </Grid>
 
         <Border Grid.Row="6" Style="{StaticResource Card}" Padding="18">
@@ -3000,7 +3029,7 @@ $mainXaml = @"
                 <TextBox x:Name="ActivityProjectBox" Grid.Row="4" Grid.Column="0" ToolTip="Projektnummer" FontSize="13" Padding="10,7" BorderThickness="1"/>
                 <TextBox x:Name="ActivityDescriptionBox" Grid.Row="4" Grid.Column="2" ToolTip="Tätigkeit" FontSize="13" Padding="10,7" BorderThickness="1"/>
                 <TextBox x:Name="ActivityHoursBox" Grid.Row="4" Grid.Column="4" ToolTip="Dauer in Stunden, z.B. 1 oder 1,5" FontSize="13" Padding="10,7" BorderThickness="1"/>
-                <Button x:Name="ActivitySaveButton" Grid.Row="4" Grid.Column="6" Content="Speichern" Style="{StaticResource PillButton}" Background="#007AFF" Height="36" Padding="10,0"/>
+                <Button x:Name="ActivitySaveButton" Grid.Row="4" Grid.Column="6" Content="Speichern" Style="{StaticResource PillButton}" Height="36" Padding="10,0"/>
 
                 <ScrollViewer Grid.Row="8" Grid.ColumnSpan="7" MaxHeight="94" VerticalScrollBarVisibility="Auto">
                     <StackPanel x:Name="ActivityListPanel"/>
@@ -3243,10 +3272,7 @@ function Refresh-ActivityList {
         $editButton.Height = 28
         $editButton.Padding = New-Object System.Windows.Thickness -ArgumentList 8, 0, 8, 0
         $editButton.Margin = New-Object System.Windows.Thickness -ArgumentList 8, 0, 0, 0
-        $editButton.Background = New-Brush "#3A3A3C"
-        $editButton.Foreground = New-Brush "#FFFFFF"
-        $editButton.BorderThickness = New-Object System.Windows.Thickness -ArgumentList 0
-        $editButton.Style = $mainWindow.Resources["PillButton"]
+        $editButton.Style = $mainWindow.Resources["PillDarkButton"]
         [System.Windows.Controls.Grid]::SetColumn($editButton, 3)
         $row.Children.Add($editButton) | Out-Null
 
@@ -3256,10 +3282,7 @@ function Refresh-ActivityList {
         $deleteButton.Height = 28
         $deleteButton.Padding = New-Object System.Windows.Thickness -ArgumentList 8, 0, 8, 0
         $deleteButton.Margin = New-Object System.Windows.Thickness -ArgumentList 6, 0, 0, 0
-        $deleteButton.Background = New-Brush "#FF3B30"
-        $deleteButton.Foreground = New-Brush "#FFFFFF"
-        $deleteButton.BorderThickness = New-Object System.Windows.Thickness -ArgumentList 0
-        $deleteButton.Style = $mainWindow.Resources["PillButton"]
+        $deleteButton.Style = $mainWindow.Resources["PillDangerButton"]
         [System.Windows.Controls.Grid]::SetColumn($deleteButton, 4)
         $row.Children.Add($deleteButton) | Out-Null
 

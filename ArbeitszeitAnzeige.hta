@@ -88,8 +88,30 @@ button {
     height: 34px;
     margin-right: 6px;
     padding: 0 12px;
+    border: 2px solid transparent;
+    background: #3a3a3c;
+    color: #ffffff;
     font-family: Segoe UI, Arial, sans-serif;
     font-size: 13px;
+    font-weight: 600;
+}
+
+#pauseBtn {
+    background: #005bbb;
+}
+
+#resumeBtn {
+    background: #1f7a3d;
+}
+
+button:hover {
+    border-color: #ffffff;
+}
+
+button:disabled {
+    border-color: #d7d7dc;
+    background: #d7d7dc;
+    color: #4a4a4f;
 }
 
 #csvBtn {

@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $trackerPath = Join-Path $repoRoot "Arbeitszeit.ps1"
 $displayPath = Join-Path $repoRoot "ArbeitszeitAnzeige.ps1"
+$legacyDisplayPath = Join-Path $repoRoot "ArbeitszeitAnzeige.hta"
 $settingsPath = Join-Path $repoRoot "ArbeitszeitSettings.ps1"
 $script:Assertions = 0
 
@@ -27,6 +28,41 @@ function Assert-Equal {
     )
 
     Assert-True -Condition ($Expected -eq $Actual) -Message ("$Message (erwartet: '$Expected', tatsächlich: '$Actual')")
+}
+
+function Get-RelativeLuminance {
+    param([string]$HexColor)
+
+    $hex = $HexColor.TrimStart("#")
+    $red = [Convert]::ToInt32($hex.Substring(0, 2), 16) / 255.0
+    $green = [Convert]::ToInt32($hex.Substring(2, 2), 16) / 255.0
+    $blue = [Convert]::ToInt32($hex.Substring(4, 2), 16) / 255.0
+    $linear = @($red, $green, $blue | ForEach-Object {
+        if ($_ -le 0.04045) { $_ / 12.92 } else { [math]::Pow(($_ + 0.055) / 1.055, 2.4) }
+    })
+
+    return (0.2126 * $linear[0]) + (0.7152 * $linear[1]) + (0.0722 * $linear[2])
+}
+
+function Get-ContrastRatio {
+    param(
+        [string]$FirstColor,
+        [string]$SecondColor
+    )
+
+    $first = Get-RelativeLuminance $FirstColor
+    $second = Get-RelativeLuminance $SecondColor
+    return ([math]::Max($first, $second) + 0.05) / ([math]::Min($first, $second) + 0.05)
+}
+
+function Convert-BrushToHex {
+    param($Brush)
+
+    if ($Brush -isnot [System.Windows.Media.SolidColorBrush]) {
+        throw "Für den Kontrasttest wird eine Volltonfarbe benötigt."
+    }
+
+    return "#{0:X2}{1:X2}{2:X2}" -f $Brush.Color.R, $Brush.Color.G, $Brush.Color.B
 }
 
 function Import-FunctionsFromFile {
@@ -418,14 +454,75 @@ Invoke-Expression $dialogStylesAssignment.Extent.Text
 Assert-True -Condition $dialogStyles.Contains('TextElement.Foreground="{TemplateBinding Foreground}"') -Message "Dialog-Buttons übernehmen ihre Textfarbe sichtbar"
 Assert-True -Condition $dialogStyles.Contains('x:Key="DialogSecondaryButton"') -Message "Sekundäre Lightmode-Buttons besitzen einen kontrastreichen Stil"
 Assert-True -Condition $dialogStyles.Contains('x:Key="DialogIconButton"') -Message "Löschaktionen besitzen einen eindeutigen Icon-Stil"
+Assert-True -Condition (-not $dialogStyles.Contains('Property="Opacity"')) -Message "Dialog-Hover macht die Beschriftung nicht transparent"
 
 Add-Type -AssemblyName PresentationFramework
 $dialogStylesReader = New-Object System.Xml.XmlNodeReader $dialogStylesXml
-[System.Windows.Markup.XamlReader]::Load($dialogStylesReader) | Out-Null
+$dialogResources = [System.Windows.Markup.XamlReader]::Load($dialogStylesReader)
 Assert-True -Condition $true -Message "Dialog-Styles lassen sich von WPF laden"
+
+foreach ($styleName in @("DialogButton", "DialogSecondaryButton", "DialogIconButton")) {
+    $button = New-Object System.Windows.Controls.Button
+    $button.Style = $dialogResources[$styleName]
+    $ratio = Get-ContrastRatio -FirstColor (Convert-BrushToHex $button.Background) -SecondColor (Convert-BrushToHex $button.Foreground)
+    Assert-True -Condition ($ratio -ge 4.5) -Message "$styleName besitzt zur Laufzeit ausreichend Kontrast"
+}
+
+$disabledDialogButton = New-Object System.Windows.Controls.Button
+$disabledDialogButton.Style = $dialogResources["DialogButton"]
+$disabledDialogButton.IsEnabled = $false
+$disabledDialogButton.ApplyTemplate() | Out-Null
+$disabledDialogRoot = $disabledDialogButton.Template.FindName("Root", $disabledDialogButton)
+$disabledDialogRatio = Get-ContrastRatio -FirstColor (Convert-BrushToHex $disabledDialogRoot.Background) -SecondColor (Convert-BrushToHex $disabledDialogButton.Foreground)
+Assert-True -Condition ($disabledDialogRatio -ge 4.5) -Message "Deaktivierte Dialogbuttons besitzen zur Laufzeit ausreichend Kontrast"
 
 $displaySource = Get-Content -LiteralPath $displayPath -Raw
 Assert-True -Condition $displaySource.Contains('x:Name="PauseSummaryText"') -Message "Korrekturfenster zeigt die live berechnete Pausensumme"
 Assert-True -Condition $displaySource.Contains('x:Name="EmptyPausePanel"') -Message "Korrekturfenster besitzt einen klaren Leerzustand"
+
+$contrastPairs = @(
+    @("#005BBB", "#FFFFFF", "Primärbuttons"),
+    @("#1F7A3D", "#FFFFFF", "Weiter-Button"),
+    @("#3A3A3C", "#FFFFFF", "Dunkle Buttons"),
+    @("#5145CD", "#FFFFFF", "Bericht-Button"),
+    @("#E4E4EA", "#1C1C1E", "Sekundärbuttons"),
+    @("#B42318", "#FFFFFF", "Löschbuttons"),
+    @("#D7D7DC", "#4A4A4F", "Deaktivierte Buttons")
+)
+
+foreach ($pair in $contrastPairs) {
+    $ratio = Get-ContrastRatio -FirstColor $pair[0] -SecondColor $pair[1]
+    Assert-True -Condition ($ratio -ge 4.5) -Message ("{0} erfüllen WCAG AA ({1:N2}:1)" -f $pair[2], $ratio)
+}
+
+$mainXamlReader = New-Object System.Xml.XmlNodeReader ([xml]$mainXaml)
+$mainWindowForContrastTest = [System.Windows.Markup.XamlReader]::Load($mainXamlReader)
+
+foreach ($buttonName in @("SetupButton", "PauseButton", "ResumeButton", "EditButton", "CsvButton", "WeekButton", "ThemeButton", "ActivitySaveButton")) {
+    $button = $mainWindowForContrastTest.FindName($buttonName)
+    Assert-True -Condition ($null -ne $button) -Message "$buttonName wurde für den Kontrasttest gefunden"
+    $ratio = Get-ContrastRatio -FirstColor (Convert-BrushToHex $button.Background) -SecondColor (Convert-BrushToHex $button.Foreground)
+    Assert-True -Condition ($ratio -ge 4.5) -Message "$buttonName besitzt zur Laufzeit ausreichend Kontrast"
+}
+
+$disabledMainButton = $mainWindowForContrastTest.FindName("PauseButton")
+$disabledMainButton.IsEnabled = $false
+$disabledMainButton.ApplyTemplate() | Out-Null
+$disabledMainRoot = $disabledMainButton.Template.FindName("Root", $disabledMainButton)
+$disabledMainRatio = Get-ContrastRatio -FirstColor (Convert-BrushToHex $disabledMainRoot.Background) -SecondColor (Convert-BrushToHex $disabledMainButton.Foreground)
+Assert-True -Condition ($disabledMainRatio -ge 4.5) -Message "Deaktivierte Hauptbuttons besitzen zur Laufzeit ausreichend Kontrast"
+
+Assert-True -Condition (-not $mainXaml.Contains('Property="Opacity"')) -Message "Hauptfenster-Hover macht die Beschriftung nicht transparent"
+Assert-True -Condition $mainXaml.Contains('Style="{StaticResource PillSuccessButton}"') -Message "Weiter-Button verwendet eine kontrastgeprüfte Rolle"
+Assert-True -Condition $mainXaml.Contains('Style="{StaticResource PillSurfaceButton}"') -Message "Heller Setup-Button verwendet dunkle Schrift"
+Assert-True -Condition $displaySource.Contains('$dialog.FindName("CloseButton").Style = $dialog.Resources["DialogSecondaryButton"]') -Message "Bericht-Schließen-Button verwendet dunkle Schrift auf hellem Grund"
+Assert-True -Condition $displaySource.Contains('$dialog.FindName("ExportButton").Style = $dialog.Resources["DialogButton"]') -Message "Bericht-Export-Button verwendet den kontrastgeprüften Primärstil"
+Assert-True -Condition $displaySource.Contains('$addPauseButton.Style = $secondaryButtonStyle') -Message "Setup-Pause-hinzufügen-Button verwendet den Sekundärstil"
+Assert-True -Condition $displaySource.Contains('$addPauseButton.Style = $dialog.Resources["DialogSecondaryButton"]') -Message "Korrektur-Pause-hinzufügen-Button verwendet den Sekundärstil"
+Assert-Equal 2 ([regex]::Matches($displaySource, [regex]::Escape('$removeButton.Style = $iconButtonStyle')).Count) "Beide dynamischen Löschbuttons verwenden den kontrastgeprüften Icon-Stil"
+
+$legacyDisplaySource = Get-Content -LiteralPath $legacyDisplayPath -Raw
+Assert-True -Condition $legacyDisplaySource.Contains('background: #005bbb;') -Message "Legacy-Pause-Button verwendet die kontrastgeprüfte Primärfarbe"
+Assert-True -Condition $legacyDisplaySource.Contains('button:disabled') -Message "Legacy-Buttons besitzen einen lesbaren Disabled-Zustand"
 
 Write-Host ("Alle Feature-Tests erfolgreich: {0} Assertions" -f $script:Assertions)
