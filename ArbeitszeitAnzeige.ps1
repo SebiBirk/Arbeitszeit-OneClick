@@ -1514,6 +1514,13 @@ function Apply-ThemeRecursive {
         return
     }
 
+    # Buttonfarben werden vollständig über kontrastgeprüfte Rollen gesteuert.
+    # Nicht in das ControlTemplate hinabsteigen, da dessen Root-Border sonst
+    # vom allgemeinen Card-Theming überschrieben wird (weiße Schrift auf Weiß).
+    if ($Element -is [System.Windows.Controls.Button]) {
+        return
+    }
+
     if ($Element -is [System.Windows.Controls.Border] -and $Element.Name -ne "StatusPill") {
         $background = Get-BrushText $Element.Background
 

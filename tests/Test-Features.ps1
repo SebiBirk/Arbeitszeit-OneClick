@@ -457,6 +457,12 @@ Assert-True -Condition $dialogStyles.Contains('x:Key="DialogIconButton"') -Messa
 Assert-True -Condition (-not $dialogStyles.Contains('Property="Opacity"')) -Message "Dialog-Hover macht die Beschriftung nicht transparent"
 
 Add-Type -AssemblyName PresentationFramework
+Import-FunctionsFromFile -Path $displayPath -Names @(
+    "Get-ThemePalette",
+    "New-Brush",
+    "Get-BrushText",
+    "Apply-ThemeRecursive"
+)
 $dialogStylesReader = New-Object System.Xml.XmlNodeReader $dialogStylesXml
 $dialogResources = [System.Windows.Markup.XamlReader]::Load($dialogStylesReader)
 Assert-True -Condition $true -Message "Dialog-Styles lassen sich von WPF laden"
@@ -504,6 +510,27 @@ foreach ($buttonName in @("SetupButton", "PauseButton", "ResumeButton", "EditBut
     $ratio = Get-ContrastRatio -FirstColor (Convert-BrushToHex $button.Background) -SecondColor (Convert-BrushToHex $button.Foreground)
     Assert-True -Condition ($ratio -ge 4.5) -Message "$buttonName besitzt zur Laufzeit ausreichend Kontrast"
 }
+
+# Die echte Theme-Rekursion ausführen: Sie darf die internen Root-Border der
+# Button-Templates nicht wie normale Karten umfärben.
+foreach ($buttonName in @("SetupButton", "PauseButton", "ResumeButton", "EditButton", "CsvButton", "WeekButton", "ThemeButton", "ActivitySaveButton")) {
+    $mainWindowForContrastTest.FindName($buttonName).ApplyTemplate() | Out-Null
+}
+
+Apply-ThemeRecursive `
+    -Element $mainWindowForContrastTest.FindName("RootGrid") `
+    -Palette (Get-ThemePalette -Theme "Light")
+
+foreach ($buttonName in @("SetupButton", "PauseButton", "ResumeButton", "EditButton", "CsvButton", "WeekButton", "ThemeButton", "ActivitySaveButton")) {
+    $button = $mainWindowForContrastTest.FindName($buttonName)
+    $buttonRoot = $button.Template.FindName("Root", $button)
+    $ratio = Get-ContrastRatio -FirstColor (Convert-BrushToHex $buttonRoot.Background) -SecondColor (Convert-BrushToHex $button.Foreground)
+    Assert-True -Condition ($ratio -ge 4.5) -Message "$buttonName bleibt nach vollständigem Lightmode-Theming lesbar"
+}
+
+Assert-Equal "#3A3A3C" (Convert-BrushToHex $mainWindowForContrastTest.FindName("EditButton").Template.FindName("Root", $mainWindowForContrastTest.FindName("EditButton")).Background) "Korrigieren-Button bleibt im Lightmode dunkel"
+Assert-Equal "#3A3A3C" (Convert-BrushToHex $mainWindowForContrastTest.FindName("CsvButton").Template.FindName("Root", $mainWindowForContrastTest.FindName("CsvButton")).Background) "CSV-Button bleibt im Lightmode dunkel"
+Assert-Equal "#3A3A3C" (Convert-BrushToHex $mainWindowForContrastTest.FindName("ThemeButton").Template.FindName("Root", $mainWindowForContrastTest.FindName("ThemeButton")).Background) "Theme-Button bleibt im Lightmode dunkel"
 
 $disabledMainButton = $mainWindowForContrastTest.FindName("PauseButton")
 $disabledMainButton.IsEnabled = $false
