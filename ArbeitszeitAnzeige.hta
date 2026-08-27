@@ -1,0 +1,534 @@
+<html>
+<head>
+<meta http-equiv="X-UA-Compatible" content="IE=11" />
+<title>Arbeitszeit</title>
+<hta:application
+    id="app"
+    applicationname="Arbeitszeit"
+    border="thin"
+    caption="yes"
+    icon="C:\Arbeitszeit\Arbeitszeit.ico"
+    maximizebutton="no"
+    minimizebutton="yes"
+    scroll="no"
+    showintaskbar="yes"
+    singleinstance="yes"
+    sysmenu="yes"
+    windowstate="normal" />
+<style type="text/css">
+body {
+    margin: 0;
+    background: #f8fafc;
+    color: #111827;
+    font-family: Segoe UI, Arial, sans-serif;
+    font-size: 13px;
+}
+
+.wrap {
+    padding: 14px 18px 16px 18px;
+}
+
+.caption {
+    color: #4b5563;
+    font-size: 12px;
+}
+
+.net {
+    margin-top: 2px;
+    font-size: 38px;
+    font-weight: 700;
+    line-height: 46px;
+}
+
+.status {
+    margin: 4px 0 14px 0;
+    font-weight: 700;
+}
+
+.work {
+    color: #166534;
+}
+
+.pause {
+    color: #b45309;
+}
+
+.stale {
+    color: #b91c1c;
+}
+
+.missing {
+    color: #4b5563;
+}
+
+.row {
+    clear: both;
+    height: 27px;
+}
+
+.label {
+    float: left;
+    width: 132px;
+    color: #4b5563;
+}
+
+.value {
+    float: right;
+    width: 168px;
+    text-align: right;
+    font-weight: 700;
+}
+
+.buttons {
+    clear: both;
+    padding-top: 12px;
+}
+
+button {
+    height: 34px;
+    margin-right: 6px;
+    padding: 0 12px;
+    font-family: Segoe UI, Arial, sans-serif;
+    font-size: 13px;
+}
+
+#csvBtn {
+    margin-right: 0;
+}
+
+.hint {
+    clear: both;
+    padding-top: 10px;
+    color: #6b7280;
+    font-size: 11px;
+}
+</style>
+<script language="javascript" type="text/javascript">
+var baseDir = "C:\\Arbeitszeit";
+var statePath = baseDir + "\\state.json";
+var controlPath = baseDir + "\\control.json";
+var csvPath = baseDir + "\\Arbeitszeiten.csv";
+var fso = new ActiveXObject("Scripting.FileSystemObject");
+var shell = new ActiveXObject("WScript.Shell");
+var currentState = null;
+var currentValues = null;
+
+function pad(number) {
+    number = parseInt(number, 10);
+    return number < 10 ? "0" + number : "" + number;
+}
+
+function todayText() {
+    var now = new Date();
+    return now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate());
+}
+
+function readText(path) {
+    if (!fso.FileExists(path)) {
+        return "";
+    }
+
+    var file = fso.OpenTextFile(path, 1, false);
+    var text = file.ReadAll();
+    file.Close();
+    return text;
+}
+
+function parseJson(text) {
+    if (!text) {
+        return null;
+    }
+
+    try {
+        if (window.JSON && JSON.parse) {
+            return JSON.parse(text);
+        }
+
+        return eval("(" + text + ")");
+    }
+    catch (e) {
+        return null;
+    }
+}
+
+function readState() {
+    return parseJson(readText(statePath));
+}
+
+function getValue(object, name, fallback) {
+    if (!object || typeof object[name] === "undefined" || object[name] === null) {
+        return fallback;
+    }
+
+    return object[name];
+}
+
+function getNumber(object, name) {
+    var value = parseFloat(getValue(object, name, 0));
+    return isNaN(value) ? 0 : value;
+}
+
+function getBoolean(object, name) {
+    var value = getValue(object, name, false);
+    return value === true || value === "True" || value === "true" || value === 1;
+}
+
+function formatDuration(seconds) {
+    seconds = parseFloat(seconds);
+
+    if (isNaN(seconds) || seconds < 0) {
+        seconds = 0;
+    }
+
+    seconds = Math.floor(seconds);
+
+    var hours = Math.floor(seconds / 3600);
+    var minutes = Math.floor((seconds % 3600) / 60);
+    var rest = seconds % 60;
+
+    return pad(hours) + ":" + pad(minutes) + ":" + pad(rest);
+}
+
+function parsePowerShellDate(text) {
+    if (!text) {
+        return null;
+    }
+
+    var match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?([+-]\d{2}):(\d{2})$/.exec(text);
+
+    if (match) {
+        var ms = 0;
+
+        if (match[7]) {
+            ms = parseInt((match[7] + "000").substr(0, 3), 10);
+        }
+
+        var offsetHours = parseInt(match[8], 10);
+        var offsetMinutes = parseInt(match[9], 10);
+        var offset = ((Math.abs(offsetHours) * 60) + offsetMinutes) * (offsetHours < 0 ? -1 : 1);
+        var utc = Date.UTC(
+            parseInt(match[1], 10),
+            parseInt(match[2], 10) - 1,
+            parseInt(match[3], 10),
+            parseInt(match[4], 10),
+            parseInt(match[5], 10),
+            parseInt(match[6], 10),
+            ms
+        );
+
+        return new Date(utc - (offset * 60000));
+    }
+
+    var parsed = new Date(text);
+    return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getLiveValues() {
+    var state = readState();
+    currentState = state;
+
+    if (!state) {
+        return {
+            hasState: false,
+            start: "--:--:--",
+            end: "--:--:--",
+            gross: 0,
+            autoPause: 0,
+            manualPause: 0,
+            totalPause: 0,
+            net: 0,
+            manualActive: false,
+            status: "Noch keine Daten",
+            kind: "missing",
+            updated: "-"
+        };
+    }
+
+    var now = new Date();
+    var gross = getNumber(state, "GrossSeconds");
+    var morning = getNumber(state, "PauseMorningSeconds");
+    var noon = getNumber(state, "PauseNoonSeconds");
+    var manual = getNumber(state, "ManualPauseSeconds");
+    var manualActive = getBoolean(state, "ManualPauseActive");
+    var status = "Arbeitszeit laeuft";
+    var kind = "work";
+    var updated = "-";
+    var stale = false;
+
+    var last = parsePowerShellDate(getValue(state, "LastTimestamp", ""));
+
+    if (last) {
+        updated = pad(last.getHours()) + ":" + pad(last.getMinutes()) + ":" + pad(last.getSeconds());
+
+        var liveDelta = (now.getTime() - last.getTime()) / 1000;
+
+        if (liveDelta >= 0 && liveDelta <= 30 && getValue(state, "Date", "") === todayText()) {
+            gross += liveDelta;
+
+            if (manualActive) {
+                var countedUntil = parsePowerShellDate(getValue(state, "ManualPauseCountedUntil", ""));
+
+                if (countedUntil) {
+                    var manualDelta = (now.getTime() - countedUntil.getTime()) / 1000;
+
+                    if (manualDelta >= 0 && manualDelta <= 30) {
+                        manual += manualDelta;
+                    }
+                }
+            }
+        }
+        else if (liveDelta > 30) {
+            stale = true;
+        }
+    }
+    else {
+        stale = true;
+    }
+
+    if (stale) {
+        status = "Tracker nicht aktuell";
+        kind = "stale";
+    }
+    else if (manualActive) {
+        status = "Manuelle Pause laeuft";
+        kind = "pause";
+    }
+
+    var autoPause = morning + noon;
+    var totalPause = autoPause + manual;
+    var net = gross - totalPause;
+
+    if (net < 0) {
+        net = 0;
+    }
+
+    return {
+        hasState: true,
+        start: getValue(state, "StartTime", "--:--:--"),
+        end: getValue(state, "EndTime", "--:--:--"),
+        gross: gross,
+        autoPause: autoPause,
+        manualPause: manual,
+        totalPause: totalPause,
+        net: net,
+        manualActive: manualActive,
+        status: status,
+        kind: kind,
+        updated: updated
+    };
+}
+
+function setText(id, text) {
+    document.getElementById(id).innerText = text;
+}
+
+function updateUi() {
+    var values = getLiveValues();
+    currentValues = values;
+
+    setText("net", formatDuration(values.net));
+    setText("status", values.status);
+    document.getElementById("status").className = "status " + values.kind;
+    setText("start", values.start);
+    setText("end", values.end);
+    setText("gross", formatDuration(values.gross));
+    setText("autoPause", formatDuration(values.autoPause));
+    setText("manualPause", formatDuration(values.manualPause));
+    setText("updated", values.updated);
+
+    document.getElementById("pauseBtn").disabled = !values.hasState || values.manualActive;
+    document.getElementById("resumeBtn").disabled = !values.hasState || !values.manualActive;
+    document.getElementById("editBtn").disabled = !values.hasState;
+}
+
+function quoteJson(value) {
+    value = String(value);
+    value = value.replace(/\\/g, "\\\\");
+    value = value.replace(/"/g, "\\\"");
+    value = value.replace(/\r/g, "\\r");
+    value = value.replace(/\n/g, "\\n");
+    return "\"" + value + "\"";
+}
+
+function quoteCommand(value) {
+    value = String(value);
+    value = value.replace(/"/g, "\"\"");
+    return "\"" + value + "\"";
+}
+
+function createId() {
+    return "hta-" + new Date().getTime() + "-" + Math.floor(Math.random() * 1000000);
+}
+
+function writeControl(action, values) {
+    var json = "{";
+    json += "\"Id\":" + quoteJson(createId()) + ",";
+    json += "\"Action\":" + quoteJson(action) + ",";
+    json += "\"CreatedAt\":\"\",";
+
+    if (values) {
+        json += "\"Values\":{";
+        json += "\"StartTime\":" + quoteJson(values.StartTime) + ",";
+        json += "\"PauseMorningSeconds\":" + values.PauseMorningSeconds + ",";
+        json += "\"PauseNoonSeconds\":" + values.PauseNoonSeconds + ",";
+        json += "\"ManualPauseSeconds\":" + values.ManualPauseSeconds + ",";
+        json += "\"Note\":" + quoteJson(values.Note);
+        json += "}";
+    }
+    else {
+        json += "\"Values\":null";
+    }
+
+    json += "}";
+
+    var file = fso.CreateTextFile(controlPath, true, false);
+    file.Write(json);
+    file.Close();
+}
+
+function startManualPause() {
+    writeControl("StartManualPause", null);
+    setTimeout(updateUi, 800);
+}
+
+function stopManualPause() {
+    writeControl("StopManualPause", null);
+    setTimeout(updateUi, 800);
+}
+
+function normalizeTime(text) {
+    text = String(text || "").replace(/^\s+|\s+$/g, "");
+
+    var match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(text);
+
+    if (!match) {
+        return "";
+    }
+
+    var hours = parseInt(match[1], 10);
+    var minutes = parseInt(match[2], 10);
+    var seconds = match[3] ? parseInt(match[3], 10) : 0;
+
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59) {
+        return "";
+    }
+
+    return pad(hours) + ":" + pad(minutes) + ":" + pad(seconds);
+}
+
+function promptMinutes(label, seconds) {
+    var current = Math.round((seconds / 60) * 10) / 10;
+    var text = prompt(label, String(current).replace(".", ","));
+
+    if (text === null) {
+        return null;
+    }
+
+    text = String(text).replace(",", ".");
+    var number = parseFloat(text);
+
+    if (isNaN(number) || number < 0) {
+        alert("Bitte eine Minuten-Zahl eingeben.");
+        return null;
+    }
+
+    return number * 60;
+}
+
+function editToday() {
+    var state = readState();
+
+    if (!state) {
+        alert("Es gibt noch keinen Tagesstand.");
+        return;
+    }
+
+    var start = prompt("Startzeit heute (HH:mm oder HH:mm:ss)", getValue(state, "StartTime", ""));
+
+    if (start === null) {
+        return;
+    }
+
+    start = normalizeTime(start);
+
+    if (!start) {
+        alert("Bitte die Startzeit als HH:mm oder HH:mm:ss eingeben.");
+        return;
+    }
+
+    var morning = promptMinutes("Pause 08:55-09:35 in Minuten", getNumber(state, "PauseMorningSeconds"));
+
+    if (morning === null) {
+        return;
+    }
+
+    var noon = promptMinutes("Pause 11:55-12:45 in Minuten", getNumber(state, "PauseNoonSeconds"));
+
+    if (noon === null) {
+        return;
+    }
+
+    var manual = promptMinutes("Manuelle Pause in Minuten", getNumber(state, "ManualPauseSeconds"));
+
+    if (manual === null) {
+        return;
+    }
+
+    var note = prompt("Notiz fuer heute", getValue(state, "Note", ""));
+
+    if (note === null) {
+        return;
+    }
+
+    writeControl("UpdateToday", {
+        StartTime: start,
+        PauseMorningSeconds: morning,
+        PauseNoonSeconds: noon,
+        ManualPauseSeconds: manual,
+        Note: note
+    });
+
+    setTimeout(updateUi, 1000);
+}
+
+function openCsv() {
+    if (!fso.FileExists(csvPath)) {
+        alert("Die CSV-Datei existiert noch nicht.");
+        return;
+    }
+
+    shell.Run("explorer.exe " + quoteCommand(csvPath), 1, false);
+}
+
+window.onload = function () {
+    window.resizeTo(394, 388);
+    window.moveTo(screen.availWidth - 414, screen.availHeight - 408);
+    updateUi();
+    window.setInterval(updateUi, 1000);
+};
+</script>
+</head>
+<body>
+<div class="wrap">
+    <div class="caption">Netto heute</div>
+    <div id="net" class="net">00:00:00</div>
+    <div id="status" class="status missing">Lade...</div>
+
+    <div class="row"><div class="label">Start</div><div id="start" class="value">-</div></div>
+    <div class="row"><div class="label">Ende</div><div id="end" class="value">-</div></div>
+    <div class="row"><div class="label">Brutto</div><div id="gross" class="value">-</div></div>
+    <div class="row"><div class="label">Pause auto</div><div id="autoPause" class="value">-</div></div>
+    <div class="row"><div class="label">Pause manuell</div><div id="manualPause" class="value">-</div></div>
+    <div class="row"><div class="label">Aktualisiert</div><div id="updated" class="value">-</div></div>
+
+    <div class="buttons">
+        <button id="pauseBtn" onclick="startManualPause()">Pause</button>
+        <button id="resumeBtn" onclick="stopManualPause()">Weiter</button>
+        <button id="editBtn" onclick="editToday()">Korrigieren</button>
+        <button id="csvBtn" onclick="openCsv()">CSV</button>
+    </div>
+
+    <div class="hint">Dieses Fenster kann geschlossen werden; der Tracker laeuft im Hintergrund weiter.</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# Build-Ausgaben
+dist/
+
+# Lokal erzeugte Arbeitszeit- und Zustandsdaten
+Arbeitszeiten.csv
+Arbeitszeit_Taetigkeiten.csv
+taetigkeiten.json
+settings.json
+state.json
+control.json
+notification-state.json
+
+# Laufzeitprotokolle und generierte Hosts
+*.log
+ArbeitszeitTracker.exe
+ArbeitszeitAnzeige.exe
+
+# Editor- und Betriebssystemdateien
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.user
+*.suo
