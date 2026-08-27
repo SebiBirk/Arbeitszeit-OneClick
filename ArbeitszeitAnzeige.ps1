@@ -177,7 +177,7 @@ function Convert-ToTimeText {
         return $null
     }
 
-    $formats = @("HH:mm:ss", "HH:mm")
+    $formats = @("HH:mm:ss", "H:mm:ss", "HH:mm", "H:mm")
     $parsed = [datetime]::MinValue
 
     foreach ($format in $formats) {
@@ -219,6 +219,155 @@ function Get-WorkDate {
     }
 
     return $null
+}
+
+function Get-PauseIntervalDateTime {
+    param(
+        $Interval,
+        [string]$Name
+    )
+
+    if ($null -eq $Interval -or $Interval.PSObject.Properties.Name -notcontains $Name) {
+        return $null
+    }
+
+    try {
+        return [datetime]::Parse([string]$Interval.$Name)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Format-PauseIntervals {
+    param(
+        $Intervals
+    )
+
+    $parts = @()
+
+    foreach ($interval in @($Intervals)) {
+        $start = Get-PauseIntervalDateTime -Interval $interval -Name "Start"
+        $end = Get-PauseIntervalDateTime -Interval $interval -Name "End"
+
+        if ($null -eq $start -or $null -eq $end -or $end -le $start) {
+            continue
+        }
+
+        $label = if ($interval.PSObject.Properties.Name -contains "Label") { [string]$interval.Label } else { "" }
+
+        if ([string]::IsNullOrWhiteSpace($label)) {
+            $label = if ($interval.PSObject.Properties.Name -contains "Kind") { [string]$interval.Kind } else { "Pause" }
+        }
+
+        $parts += ("{0}-{1} ({2})" -f $start.ToString("HH:mm"), $end.ToString("HH:mm"), $label)
+    }
+
+    return ($parts -join "; ")
+}
+
+function ConvertFrom-PauseIntervalsText {
+    param(
+        [string]$Text,
+        [datetime]$Date
+    )
+
+    $intervals = @()
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $intervals
+    }
+
+    foreach ($part in @($Text -split ";")) {
+        if ($part -notmatch '^\s*(?<start>\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(?<end>\d{1,2}:\d{2}(?::\d{2})?)(?:\s*\((?<label>[^)]*)\))?\s*$') {
+            continue
+        }
+
+        $startText = Convert-ToTimeText -TimeText $matches.start
+        $endText = Convert-ToTimeText -TimeText $matches.end
+
+        if ([string]::IsNullOrWhiteSpace($startText) -or [string]::IsNullOrWhiteSpace($endText)) {
+            continue
+        }
+
+        $start = [datetime]::ParseExact(
+            ($Date.ToString("yyyy-MM-dd") + " " + $startText),
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+        $end = [datetime]::ParseExact(
+            ($Date.ToString("yyyy-MM-dd") + " " + $endText),
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+
+        if ($end -le $start) {
+            continue
+        }
+
+        $label = [string]$matches.label
+
+        if ([string]::IsNullOrWhiteSpace($label)) {
+            $label = "Pause"
+        }
+
+        $intervals += [PSCustomObject][ordered]@{
+            Kind  = "Imported"
+            Key   = "Imported"
+            Label = $label.Trim()
+            Start = $start.ToString("o")
+            End   = $end.ToString("o")
+        }
+    }
+
+    return $intervals
+}
+
+function Get-StatePauseIntervalsText {
+    param($State)
+
+    if ($null -eq $State) {
+        return ""
+    }
+
+    if ($State.PSObject.Properties.Name -contains "PauseIntervals") {
+        $formatted = Format-PauseIntervals -Intervals $State.PauseIntervals
+
+        if (-not [string]::IsNullOrWhiteSpace($formatted)) {
+            return $formatted
+        }
+    }
+
+    if ($State.PSObject.Properties.Name -contains "PauseIntervalsText") {
+        return [string]$State.PauseIntervalsText
+    }
+
+    return ""
+}
+
+function Get-ExpectedWorkSeconds {
+    param(
+        [datetime]$StartDate,
+        [datetime]$EndDate,
+        [double]$WeekTargetHours = 40
+    )
+
+    if ($EndDate.Date -lt $StartDate.Date) {
+        return 0.0
+    }
+
+    $workDays = 0
+    $date = $StartDate.Date
+
+    while ($date -le $EndDate.Date) {
+        if ($date.DayOfWeek -notin @([System.DayOfWeek]::Saturday, [System.DayOfWeek]::Sunday)) {
+            $workDays++
+        }
+
+        $date = $date.AddDays(1)
+    }
+
+    return [double]$workDays * ([math]::Max(0, $WeekTargetHours) / 5.0) * 3600
 }
 
 function Convert-ToDouble {
@@ -612,6 +761,7 @@ function Recover-DisplayStateFromCsv {
             ManualPauseActive        = $false
             ManualPauseStartedAt     = ""
             ManualPauseCountedUntil  = ""
+            PauseIntervalsText       = [string]$row.Pausen_Zeitraeume
             Note                     = [string]$row.Notiz
             LastControlId            = ""
             LastTimestamp            = $now.ToString("o")
@@ -704,6 +854,7 @@ function Get-LiveValues {
             AutoPauseSeconds   = 0
             ManualPauseSeconds = 0
             TotalPauseSeconds  = 0
+            PauseIntervalsText = ""
             NetSeconds         = 0
             ManualPauseActive  = $false
             StatusText         = "Noch keine Daten"
@@ -726,6 +877,7 @@ function Get-LiveValues {
     }
 
     $manualPause = Get-StateDouble -State $state -Name "ManualPauseSeconds"
+    $pauseIntervalsText = Get-StatePauseIntervalsText -State $state
     $manualActive = Get-StateBool -State $state -Name "ManualPauseActive"
     $startPending = Get-StateBool -State $state -Name "StartPending"
     $lastTimestamp = Get-StateValue -State $state -Name "LastTimestamp" -DefaultValue ""
@@ -812,6 +964,7 @@ function Get-LiveValues {
         AutoPauseSeconds   = $autoPause
         ManualPauseSeconds = $manualPause
         TotalPauseSeconds  = $totalPause
+        PauseIntervalsText = $pauseIntervalsText
         NetSeconds         = $netSeconds
         ManualPauseActive  = $manualActive
         StartPending       = $startPending
@@ -908,6 +1061,7 @@ function Get-WeekReportData {
             NetSeconds    = Convert-DurationTextToSeconds ([string]$row.Netto)
             GrossSeconds  = Convert-DurationTextToSeconds ([string]$row.Brutto)
             PauseSeconds  = Convert-DurationTextToSeconds ([string]$row.Pause_Gesamt)
+            PauseRanges   = [string]$row.Pausen_Zeitraeume
             ActivityHours = [double]$activitySummary.Hours
             ActivityCount = [int]$activitySummary.Count
             ActivityText  = [string]$activitySummary.Details
@@ -929,6 +1083,7 @@ function Get-WeekReportData {
                 NetSeconds    = [double]$Values.NetSeconds
                 GrossSeconds  = [double]$Values.GrossSeconds
                 PauseSeconds  = [double]$Values.TotalPauseSeconds
+                PauseRanges   = [string]$Values.PauseIntervalsText
                 ActivityHours = [double]$activitySummary.Hours
                 ActivityCount = [int]$activitySummary.Count
                 ActivityText  = [string]$activitySummary.Details
@@ -952,6 +1107,7 @@ function Get-WeekReportData {
                 NetSeconds    = 0.0
                 GrossSeconds  = 0.0
                 PauseSeconds  = 0.0
+                PauseRanges   = ""
                 ActivityHours = [double](Get-WorkEntrySummaryForDate -DateText $key).Hours
                 ActivityCount = [int](Get-WorkEntrySummaryForDate -DateText $key).Count
                 ActivityText  = [string](Get-WorkEntrySummaryForDate -DateText $key).Details
@@ -997,17 +1153,163 @@ function Get-WeekReportData {
     }
 }
 
-function ConvertTo-ReportHtml {
+function Get-MonthReportData {
     param(
-        $Data
+        $Values = (Get-LiveValues)
     )
 
-    $rows = foreach ($day in @($Data.Days)) {
+    $settings = $Values.Settings
+    $today = (Get-Date).Date
+    $monthStart = [datetime]::new($today.Year, $today.Month, 1)
+    $monthEnd = $monthStart.AddMonths(1).AddDays(-1)
+    $periodEnd = if ($today -lt $monthEnd) { $today } else { $monthEnd }
+    $dayMap = @{}
+
+    foreach ($row in (Read-WorkCsvRows)) {
+        $date = Get-WorkDate -DateText ([string]$row.Datum)
+
+        if ($null -eq $date -or $date -gt $today) {
+            continue
+        }
+
+        $key = $date.ToString("yyyy-MM-dd")
+        $activitySummary = Get-WorkEntrySummaryForDate -DateText $key
+        $dayMap[$key] = [PSCustomObject][ordered]@{
+            Date          = $date
+            NetSeconds    = Convert-DurationTextToSeconds ([string]$row.Netto)
+            GrossSeconds  = Convert-DurationTextToSeconds ([string]$row.Brutto)
+            PauseSeconds  = Convert-DurationTextToSeconds ([string]$row.Pause_Gesamt)
+            PauseRanges   = [string]$row.Pausen_Zeitraeume
+            ActivityHours = [double]$activitySummary.Hours
+            ActivityCount = [int]$activitySummary.Count
+            ActivityText  = [string]$activitySummary.Details
+            Status        = [string]$row.Status
+        }
+    }
+
+    if ($Values.HasState) {
+        $liveDate = [datetime]::ParseExact(
+            [string]$Values.Date,
+            "yyyy-MM-dd",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+
+        if ($liveDate -le $today) {
+            $key = $liveDate.ToString("yyyy-MM-dd")
+            $activitySummary = Get-WorkEntrySummaryForDate -DateText $key
+            $dayMap[$key] = [PSCustomObject][ordered]@{
+                Date          = $liveDate
+                NetSeconds    = [double]$Values.NetSeconds
+                GrossSeconds  = [double]$Values.GrossSeconds
+                PauseSeconds  = [double]$Values.TotalPauseSeconds
+                PauseRanges   = [string]$Values.PauseIntervalsText
+                ActivityHours = [double]$activitySummary.Hours
+                ActivityCount = [int]$activitySummary.Count
+                ActivityText  = [string]$activitySummary.Details
+                Status        = if ($Values.ManualPauseActive) { "Manuelle Pause" } else { "Arbeit" }
+            }
+        }
+    }
+
+    $monthDays = @()
+    $date = $monthStart
+
+    while ($date -le $periodEnd) {
+        $key = $date.ToString("yyyy-MM-dd")
+
+        if ($dayMap.ContainsKey($key)) {
+            $monthDays += $dayMap[$key]
+        }
+        else {
+            $activitySummary = Get-WorkEntrySummaryForDate -DateText $key
+            $monthDays += [PSCustomObject][ordered]@{
+                Date          = $date
+                NetSeconds    = 0.0
+                GrossSeconds  = 0.0
+                PauseSeconds  = 0.0
+                PauseRanges   = ""
+                ActivityHours = [double]$activitySummary.Hours
+                ActivityCount = [int]$activitySummary.Count
+                ActivityText  = [string]$activitySummary.Details
+                Status        = ""
+            }
+        }
+
+        $date = $date.AddDays(1)
+    }
+
+    $monthNet = [double](@($monthDays | Measure-Object -Property NetSeconds -Sum).Sum)
+    $monthGross = [double](@($monthDays | Measure-Object -Property GrossSeconds -Sum).Sum)
+    $monthPause = [double](@($monthDays | Measure-Object -Property PauseSeconds -Sum).Sum)
+    $monthActivity = [double](@($monthDays | Measure-Object -Property ActivityHours -Sum).Sum)
+    $monthTarget = Get-ExpectedWorkSeconds `
+        -StartDate $monthStart `
+        -EndDate $periodEnd `
+        -WeekTargetHours ([double]$settings.WeekTargetHours)
+    $fullMonthTarget = Get-ExpectedWorkSeconds `
+        -StartDate $monthStart `
+        -EndDate $monthEnd `
+        -WeekTargetHours ([double]$settings.WeekTargetHours)
+
+    $allDays = @($dayMap.Values | Where-Object { $_.Date -le $today } | Sort-Object Date)
+    $overallNet = [double](@($allDays | Measure-Object -Property NetSeconds -Sum).Sum)
+    $overallTarget = 0.0
+    $overallStart = $null
+
+    if ($allDays.Count -gt 0) {
+        $overallStart = [datetime]$allDays[0].Date
+        $overallTarget = Get-ExpectedWorkSeconds `
+            -StartDate $overallStart `
+            -EndDate $today `
+            -WeekTargetHours ([double]$settings.WeekTargetHours)
+    }
+
+    $culture = [System.Globalization.CultureInfo]::GetCultureInfo("de-DE")
+    $monthName = $culture.TextInfo.ToTitleCase($today.ToString("MMMM yyyy", $culture))
+
+    return [PSCustomObject][ordered]@{
+        MonthStart          = $monthStart
+        MonthEnd            = $monthEnd
+        PeriodEnd           = $periodEnd
+        MonthName           = $monthName
+        Days                = $monthDays
+        TotalNetSeconds     = $monthNet
+        TotalGrossSeconds   = $monthGross
+        TotalPauseSeconds   = $monthPause
+        TotalActivityHours  = $monthActivity
+        TargetToDateSeconds = $monthTarget
+        FullTargetSeconds   = $fullMonthTarget
+        BalanceSeconds      = $monthNet - $monthTarget
+        OverallStart        = $overallStart
+        OverallNetSeconds   = $overallNet
+        OverallTargetSeconds = $overallTarget
+        OverallBalanceSeconds = $overallNet - $overallTarget
+        WeekTargetHours     = [double]$settings.WeekTargetHours
+        Values              = $Values
+    }
+}
+
+function ConvertTo-ReportHtml {
+    param(
+        $Data,
+        $MonthData
+    )
+
+    $weekRows = foreach ($day in @($Data.Days)) {
         $name = Get-DayNameShort -Date $day.Date
         $date = $day.Date.ToString("dd.MM.yyyy")
         $activity = "{0:N2} h" -f [double]$day.ActivityHours
         $activityText = [System.Net.WebUtility]::HtmlEncode([string]$day.ActivityText)
-        "<tr><td>$name</td><td>$date</td><td>$(Format-CompactDuration $day.NetSeconds)</td><td>$activity</td><td>$(Format-CompactDuration $day.PauseSeconds)</td><td>$([System.Net.WebUtility]::HtmlEncode($day.Status))</td><td>$activityText</td></tr>"
+        $pauseRanges = [System.Net.WebUtility]::HtmlEncode([string]$day.PauseRanges)
+        "<tr><td>$name</td><td>$date</td><td>$(Format-CompactDuration $day.NetSeconds)</td><td>$activity</td><td>$(Format-CompactDuration $day.PauseSeconds)</td><td>$pauseRanges</td><td>$([System.Net.WebUtility]::HtmlEncode($day.Status))</td><td>$activityText</td></tr>"
+    }
+
+    $monthRows = foreach ($day in @($MonthData.Days)) {
+        $name = Get-DayNameShort -Date $day.Date
+        $date = $day.Date.ToString("dd.MM.yyyy")
+        $activity = "{0:N2} h" -f [double]$day.ActivityHours
+        $pauseRanges = [System.Net.WebUtility]::HtmlEncode([string]$day.PauseRanges)
+        "<tr><td>$name</td><td>$date</td><td>$(Format-CompactDuration $day.NetSeconds)</td><td>$(Format-CompactDuration $day.PauseSeconds)</td><td>$pauseRanges</td><td>$activity</td><td>$([System.Net.WebUtility]::HtmlEncode($day.Status))</td></tr>"
     }
 
     $best = "-"
@@ -1017,16 +1319,20 @@ function ConvertTo-ReportHtml {
     }
 
     $balanceClass = if ($Data.BalanceSeconds -ge 0) { "good" } else { "bad" }
+    $monthBalanceClass = if ($MonthData.BalanceSeconds -ge 0) { "good" } else { "bad" }
+    $overallBalanceClass = if ($MonthData.OverallBalanceSeconds -ge 0) { "good" } else { "bad" }
+    $overallStartText = if ($null -eq $MonthData.OverallStart) { "keine Daten" } else { "seit " + $MonthData.OverallStart.ToString("dd.MM.yyyy") }
 
     return @"
 <!doctype html>
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<title>Arbeitszeit Wochenbericht</title>
+<title>Arbeitszeitbericht</title>
 <style>
 body { font-family: Segoe UI, Arial, sans-serif; margin: 34px; color: #1c1c1e; }
 h1 { margin: 0 0 4px 0; font-size: 28px; }
+h2 { margin: 32px 0 4px 0; font-size: 22px; }
 .sub { color: #6e6e73; margin-bottom: 26px; }
 .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
 .card { border: 1px solid #e5e5ea; border-radius: 14px; padding: 14px; }
@@ -1037,10 +1343,12 @@ h1 { margin: 0 0 4px 0; font-size: 28px; }
 table { width: 100%; border-collapse: collapse; margin-top: 14px; }
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e5e5ea; }
 th { color: #6e6e73; font-size: 12px; text-transform: uppercase; }
+.hint { color: #6e6e73; font-size: 12px; margin-top: 12px; }
 </style>
 </head>
 <body>
-<h1>Wochenbericht Arbeitszeit</h1>
+<h1>Arbeitszeitbericht</h1>
+<h2>Woche</h2>
 <div class="sub">$($Data.WeekStart.ToString("dd.MM.yyyy")) bis $($Data.WeekEnd.ToString("dd.MM.yyyy"))</div>
 <div class="cards">
   <div class="card"><div class="label">Netto</div><div class="value">$(Format-CompactDuration $Data.TotalNetSeconds)</div></div>
@@ -1055,11 +1363,33 @@ th { color: #6e6e73; font-size: 12px; text-transform: uppercase; }
   <div class="card"><div class="label">Pausenquote</div><div class="value">$("{0:N1}" -f $Data.PauseRatio)%</div></div>
 </div>
 <table>
-<thead><tr><th>Tag</th><th>Datum</th><th>Netto</th><th>Tätigkeiten</th><th>Pause</th><th>Status</th><th>Details</th></tr></thead>
+<thead><tr><th>Tag</th><th>Datum</th><th>Netto</th><th>Tätigkeiten</th><th>Pause</th><th>Pausenzeiten</th><th>Status</th><th>Details</th></tr></thead>
 <tbody>
-$($rows -join "`n")
+$($weekRows -join "`n")
 </tbody>
 </table>
+
+<h2>Monat: $($MonthData.MonthName)</h2>
+<div class="sub">$($MonthData.MonthStart.ToString("dd.MM.yyyy")) bis $($MonthData.PeriodEnd.ToString("dd.MM.yyyy"))</div>
+<div class="cards">
+  <div class="card"><div class="label">Netto Monat</div><div class="value">$(Format-CompactDuration $MonthData.TotalNetSeconds)</div></div>
+  <div class="card"><div class="label">Soll bis heute</div><div class="value">$(Format-CompactDuration $MonthData.TargetToDateSeconds)</div></div>
+  <div class="card"><div class="label">Monatssaldo</div><div class="value $monthBalanceClass">$(Format-CompactDuration $MonthData.BalanceSeconds)</div></div>
+  <div class="card"><div class="label">Überstunden gesamt</div><div class="value $overallBalanceClass">$(Format-CompactDuration $MonthData.OverallBalanceSeconds)</div></div>
+</div>
+<div class="cards">
+  <div class="card"><div class="label">Soll voller Monat</div><div class="value">$(Format-CompactDuration $MonthData.FullTargetSeconds)</div></div>
+  <div class="card"><div class="label">Pause Monat</div><div class="value">$(Format-CompactDuration $MonthData.TotalPauseSeconds)</div></div>
+  <div class="card"><div class="label">Tätigkeiten Monat</div><div class="value">$("{0:N2}" -f $MonthData.TotalActivityHours) h</div></div>
+  <div class="card"><div class="label">Gesamtzeit $overallStartText</div><div class="value">$(Format-CompactDuration $MonthData.OverallNetSeconds)</div></div>
+</div>
+<table>
+<thead><tr><th>Tag</th><th>Datum</th><th>Netto</th><th>Pause</th><th>Pausenzeiten</th><th>Tätigkeiten</th><th>Status</th></tr></thead>
+<tbody>
+$($monthRows -join "`n")
+</tbody>
+</table>
+<div class="hint">Sollzeit und Überstunden basieren auf $($MonthData.WeekTargetHours.ToString("0.##")) Stunden pro Woche, verteilt auf Montag bis Freitag. Feiertage und Abwesenheiten werden nicht automatisch abgezogen.</div>
 </body>
 </html>
 "@
@@ -1088,17 +1418,18 @@ function Export-WeekReport {
     )
 
     $data = Get-WeekReportData
+    $monthData = Get-MonthReportData -Values $data.Values
     $reportDir = Join-Path $BaseDir "reports"
 
     if (!(Test-Path $reportDir)) {
         New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
     }
 
-    $baseName = "Wochenbericht_{0}" -f $data.WeekStart.ToString("yyyy-MM-dd")
+    $baseName = "Arbeitszeitbericht_{0}" -f (Get-Date).ToString("yyyy-MM-dd")
     $htmlPath = Join-Path $reportDir "$baseName.html"
     $pdfPath = Join-Path $reportDir "$baseName.pdf"
 
-    ConvertTo-ReportHtml -Data $data |
+    ConvertTo-ReportHtml -Data $data -MonthData $monthData |
         Set-Content -LiteralPath $htmlPath -Encoding UTF8
 
     $browser = Get-BrowserPath
@@ -1117,11 +1448,11 @@ function Export-WeekReport {
 
     if (Test-Path $pdfPath) {
         Start-Process -FilePath $pdfPath
-        Show-Info "Wochenbericht wurde als PDF erstellt."
+        Show-Info "Arbeitszeitbericht wurde als PDF erstellt."
     }
     else {
         Start-Process -FilePath $htmlPath
-        Show-Info "PDF konnte nicht automatisch erstellt werden. Der HTML-Wochenbericht wurde geöffnet."
+        Show-Info "PDF konnte nicht automatisch erstellt werden. Der HTML-Arbeitszeitbericht wurde geöffnet."
     }
 }
 
@@ -1244,7 +1575,7 @@ function Apply-MainTheme {
         Apply-ThemeRecursive -Element $rootGrid -Palette $palette
     }
 
-    foreach ($element in @($netText, $startText, $endText, $grossText, $autoPauseText, $manualPauseText, $updatedText)) {
+    foreach ($element in @($netText, $startText, $endText, $grossText, $autoPauseText, $manualPauseText, $pauseIntervalsText, $updatedText)) {
         if ($null -ne $element) {
             $element.Foreground = New-Brush $palette.Primary
         }
@@ -1382,22 +1713,59 @@ $dialogStyles = @"
         <Setter Property="Foreground" Value="White"/>
         <Setter Property="Background" Value="#007AFF"/>
         <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border Background="{TemplateBinding Background}" CornerRadius="18">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <Border x:Name="Root" Background="{TemplateBinding Background}" CornerRadius="18">
+                        <ContentPresenter HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"
+                                          TextElement.Foreground="{TemplateBinding Foreground}"/>
                     </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.88"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.72"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Root" Property="Background" Value="#E5E5EA"/>
+                            <Setter Property="Foreground" Value="#6E6E73"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
     </Style>
+    <Style x:Key="DialogSecondaryButton" TargetType="Button" BasedOn="{StaticResource DialogButton}">
+        <Setter Property="Background" Value="#E5E5EA"/>
+        <Setter Property="Foreground" Value="#1C1C1E"/>
+    </Style>
+    <Style x:Key="DialogIconButton" TargetType="Button" BasedOn="{StaticResource DialogButton}">
+        <Setter Property="Width" Value="36"/>
+        <Setter Property="MinWidth" Value="36"/>
+        <Setter Property="Height" Value="34"/>
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="Background" Value="#FF3B30"/>
+        <Setter Property="Foreground" Value="White"/>
+    </Style>
     <Style TargetType="TextBox">
-        <Setter Property="Height" Value="30"/>
-        <Setter Property="Padding" Value="9,3"/>
+        <Setter Property="Height" Value="34"/>
+        <Setter Property="Padding" Value="10,4"/>
         <Setter Property="BorderBrush" Value="#D1D1D6"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Background" Value="White"/>
+        <Setter Property="Foreground" Value="#1C1C1E"/>
+        <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+    <Style TargetType="ComboBox">
+        <Setter Property="Height" Value="34"/>
+        <Setter Property="Padding" Value="8,2"/>
+        <Setter Property="BorderBrush" Value="#D1D1D6"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Background" Value="White"/>
+        <Setter Property="Foreground" Value="#1C1C1E"/>
         <Setter Property="VerticalContentAlignment" Value="Center"/>
     </Style>
     <Style TargetType="TextBlock">
@@ -1420,14 +1788,15 @@ function Apply-DialogButtonStyles {
         $Window
     )
 
-    $style = $Window.Resources["DialogButton"]
+    $saveButton = $Window.FindName("SaveButton")
+    $cancelButton = $Window.FindName("CancelButton")
 
-    foreach ($name in @("SaveButton", "CancelButton")) {
-        $button = $Window.FindName($name)
+    if ($null -ne $saveButton) {
+        $saveButton.Style = $Window.Resources["DialogButton"]
+    }
 
-        if ($null -ne $button) {
-            $button.Style = $style
-        }
+    if ($null -ne $cancelButton) {
+        $cancelButton.Style = $Window.Resources["DialogSecondaryButton"]
     }
 }
 
@@ -1444,66 +1813,135 @@ function Open-CorrectionWindow {
     }
 
     $state = Read-State
+    $settings = $values.Settings
+    $palette = Get-ThemePalette -Theme ([string]$settings.Theme)
+    $workDate = Get-WorkDate -DateText ([string]$values.Date)
+
+    if ($null -eq $workDate) {
+        $workDate = (Get-Date).Date
+    }
+
+    $existingIntervals = @()
+
+    if ($null -ne $state -and $state.PSObject.Properties.Name -contains "PauseIntervals") {
+        $existingIntervals = @($state.PauseIntervals | Where-Object { $null -ne $_ })
+    }
+
+    if ($existingIntervals.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$values.PauseIntervalsText)) {
+        $existingIntervals = @(ConvertFrom-PauseIntervalsText -Text ([string]$values.PauseIntervalsText) -Date $workDate)
+    }
+
+    $pauseOptions = @(
+        [PSCustomObject][ordered]@{
+            Kind  = "Manual"
+            Key   = "Manual"
+            Label = "Manuell"
+        }
+    )
+
+    foreach ($pause in (Get-ArbeitszeitPauseWindows -Settings $settings -IncludeDisabled)) {
+        $pauseOptions += [PSCustomObject][ordered]@{
+            Kind  = "Auto"
+            Key   = [string]$pause.Key
+            Label = [string]$pause.Label
+        }
+    }
+
     $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Heute korrigieren"
-        Width="430"
-        Height="430"
-        ResizeMode="NoResize"
+        Width="720"
+        Height="700"
+        MinWidth="650"
+        MinHeight="590"
+        ResizeMode="CanResize"
         WindowStartupLocation="CenterOwner"
-        Background="#F5F5F7"
+        Background="$($palette.Window)"
         FontFamily="Segoe UI">
-    <Border Margin="16" Padding="20" Background="White" CornerRadius="26">
-        <Grid>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="18"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="28"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-
-            <StackPanel>
-                <TextBlock Text="Heute korrigieren" FontSize="20" FontWeight="SemiBold" Foreground="#1C1C1E"/>
-                <TextBlock Text="Ändert nur den aktuellen Tagesstand." Margin="0,4,0,0" Foreground="#6E6E73"/>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="20">
+            <StackPanel Margin="4,0,4,18">
+                <TextBlock Text="Heute korrigieren" FontSize="26" FontWeight="SemiBold" Foreground="$($palette.Primary)"/>
+                <TextBlock Text="Arbeitsbeginn und exakte Pausenintervalle für den aktuellen Tag." Margin="0,5,0,0" Foreground="$($palette.Secondary)"/>
             </StackPanel>
 
-            <Grid Grid.Row="2">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="170"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="40"/>
-                    <RowDefinition Height="40"/>
-                    <RowDefinition Height="40"/>
-                    <RowDefinition Height="40"/>
-                    <RowDefinition Height="40"/>
-                </Grid.RowDefinitions>
+            <Border Padding="20" Background="$($palette.Card)" BorderBrush="$($palette.Border)" BorderThickness="1" CornerRadius="22">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="180"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="ARBEITSBEGINN" Foreground="$($palette.Secondary)" FontSize="11" FontWeight="SemiBold"/>
+                        <TextBlock Text="Die Startzeit kann unabhängig von den Pausen angepasst werden." Margin="0,5,24,0" Foreground="$($palette.Secondary)" FontSize="12" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <TextBox x:Name="StartBox" Grid.Column="1" FontSize="15" ToolTip="Format HH:mm oder HH:mm:ss"/>
+                </Grid>
+            </Border>
 
-                <TextBlock Text="Startzeit" Grid.Row="0" Foreground="#6E6E73" VerticalAlignment="Center"/>
-                <TextBox x:Name="StartBox" Grid.Row="0" Grid.Column="1"/>
+            <Border Margin="0,14,0,0" Padding="20" Background="$($palette.Card)" BorderBrush="$($palette.Border)" BorderThickness="1" CornerRadius="22">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="Pausenzeiten" FontSize="19" FontWeight="SemiBold" Foreground="$($palette.Primary)"/>
+                            <TextBlock Text="Jede Pause wird mit Kategorie, Von und Bis gespeichert." Margin="0,4,0,0" Foreground="$($palette.Secondary)" FontSize="12"/>
+                        </StackPanel>
+                        <Border Grid.Column="1" Background="$($palette.Soft)" CornerRadius="13" Padding="12,7" VerticalAlignment="Center">
+                            <TextBlock x:Name="PauseSummaryText" Text="00:00 Pause" Foreground="$($palette.Primary)" FontWeight="SemiBold" FontSize="12"/>
+                        </Border>
+                    </Grid>
 
-                <TextBlock Text="Pause morgens (min)" Grid.Row="1" Foreground="#6E6E73" VerticalAlignment="Center"/>
-                <TextBox x:Name="MorningBox" Grid.Row="1" Grid.Column="1"/>
+                    <TextBlock x:Name="LegacyWarning" Text="Für vorhandene Pausensummen fehlen genaue Zeiträume. Bitte die tatsächlichen Pausen unten hinzufügen; beim Speichern ersetzen sie die bisherigen Summen." Margin="0,6,0,10" Foreground="#FF3B30" TextWrapping="Wrap" Visibility="Collapsed"/>
 
-                <TextBlock Text="Pause mittags (min)" Grid.Row="2" Foreground="#6E6E73" VerticalAlignment="Center"/>
-                <TextBox x:Name="NoonBox" Grid.Row="2" Grid.Column="1"/>
+                    <Grid Margin="0,18,0,7">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="112"/>
+                            <ColumnDefinition Width="112"/>
+                            <ColumnDefinition Width="44"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="KATEGORIE" Foreground="$($palette.Secondary)" FontSize="10" FontWeight="SemiBold"/>
+                        <TextBlock Text="VON" Grid.Column="1" Foreground="$($palette.Secondary)" FontSize="10" FontWeight="SemiBold"/>
+                        <TextBlock Text="BIS" Grid.Column="2" Foreground="$($palette.Secondary)" FontSize="10" FontWeight="SemiBold"/>
+                    </Grid>
 
-                <TextBlock Text="Pause manuell (min)" Grid.Row="3" Foreground="#6E6E73" VerticalAlignment="Center"/>
-                <TextBox x:Name="ManualBox" Grid.Row="3" Grid.Column="1"/>
+                    <Border x:Name="EmptyPausePanel" Background="$($palette.Soft)" CornerRadius="14" Padding="18" Margin="0,0,0,4">
+                        <TextBlock Text="Noch keine Pausenzeit vorhanden. Über „+ Pausenzeit“ kannst du einen Zeitraum ergänzen." Foreground="$($palette.Secondary)" TextAlignment="Center" TextWrapping="Wrap"/>
+                    </Border>
 
-                <TextBlock Text="Notiz" Grid.Row="4" Foreground="#6E6E73" VerticalAlignment="Center"/>
-                <TextBox x:Name="NoteBox" Grid.Row="4" Grid.Column="1"/>
-            </Grid>
+                    <ScrollViewer MaxHeight="250" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel x:Name="PauseListPanel"/>
+                    </ScrollViewer>
 
-            <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button x:Name="CancelButton" Content="Abbrechen" Background="#8E8E93" Margin="0,0,10,0"/>
+                    <Button x:Name="AddPauseButton" Content="+ Pausenzeit" Margin="0,12,0,0" HorizontalAlignment="Left"/>
+                </StackPanel>
+            </Border>
+
+            <Border Margin="0,14,0,0" Padding="20" Background="$($palette.Card)" BorderBrush="$($palette.Border)" BorderThickness="1" CornerRadius="22">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="NOTIZ" Foreground="$($palette.Secondary)" FontSize="11" FontWeight="SemiBold"/>
+                        <TextBlock Text="Optional" Margin="0,4,0,0" Foreground="$($palette.Secondary)" FontSize="12"/>
+                    </StackPanel>
+                    <TextBox x:Name="NoteBox" Grid.Column="1"/>
+                </Grid>
+            </Border>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+                <Button x:Name="CancelButton" Content="Abbrechen" Margin="0,0,10,0"/>
                 <Button x:Name="SaveButton" Content="Speichern"/>
             </StackPanel>
-        </Grid>
-    </Border>
+        </StackPanel>
+    </ScrollViewer>
 </Window>
 "@
 
@@ -1519,11 +1957,217 @@ function Open-CorrectionWindow {
         catch {}
     }
 
+    $pauseRows = New-Object System.Collections.ArrayList
+    $pauseListPanel = $dialog.FindName("PauseListPanel")
+    $emptyPausePanel = $dialog.FindName("EmptyPausePanel")
+    $pauseSummaryText = $dialog.FindName("PauseSummaryText")
+    $addPauseButton = $dialog.FindName("AddPauseButton")
+    $iconButtonStyle = $dialog.Resources["DialogIconButton"]
+
+    $addPauseButton.Style = $dialog.Resources["DialogSecondaryButton"]
+
+    foreach ($name in @("StartBox", "NoteBox")) {
+        $textBox = $dialog.FindName($name)
+        $textBox.Background = New-Brush $palette.Soft
+        $textBox.Foreground = New-Brush $palette.Primary
+        $textBox.BorderBrush = New-Brush $palette.Border
+    }
+
+    function Update-CorrectionPauseState {
+        if ($pauseRows.Count -eq 0) {
+            $emptyPausePanel.Visibility = [System.Windows.Visibility]::Visible
+            $pauseSummaryText.Text = "00:00 Pause"
+            return
+        }
+
+        $emptyPausePanel.Visibility = [System.Windows.Visibility]::Collapsed
+        $totalSeconds = 0.0
+
+        foreach ($row in @($pauseRows)) {
+            $startText = Convert-ToTimeText ([string]$row.StartBox.Text)
+            $endText = Convert-ToTimeText ([string]$row.EndBox.Text)
+
+            if ([string]::IsNullOrWhiteSpace($startText) -or [string]::IsNullOrWhiteSpace($endText)) {
+                continue
+            }
+
+            $start = [datetime]::ParseExact(
+                "$($workDate.ToString('yyyy-MM-dd')) $startText",
+                "yyyy-MM-dd HH:mm:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+            $end = [datetime]::ParseExact(
+                "$($workDate.ToString('yyyy-MM-dd')) $endText",
+                "yyyy-MM-dd HH:mm:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+
+            if ($end -gt $start) {
+                $totalSeconds += ($end - $start).TotalSeconds
+            }
+        }
+
+        $pauseSummaryText.Text = "$(Format-CompactDuration $totalSeconds) Pause"
+    }
+
+    function Add-CorrectionPauseRow {
+        param(
+            $Interval,
+            $SelectedOption
+        )
+
+        $container = New-Object System.Windows.Controls.Border
+        $container.Background = New-Brush $palette.Soft
+        $container.BorderBrush = New-Brush $palette.Border
+        $container.BorderThickness = New-Object System.Windows.Thickness -ArgumentList 1
+        $container.CornerRadius = New-Object System.Windows.CornerRadius -ArgumentList 14
+        $container.Padding = New-Object System.Windows.Thickness -ArgumentList 10
+        $container.Margin = New-Object System.Windows.Thickness -ArgumentList 0, 0, 0, 8
+
+        $grid = New-Object System.Windows.Controls.Grid
+
+        foreach ($width in @(1, 112, 112, 44)) {
+            $column = New-Object System.Windows.Controls.ColumnDefinition
+            $column.Width = if ($width -eq 1) {
+                New-Object System.Windows.GridLength -ArgumentList 1, ([System.Windows.GridUnitType]::Star)
+            }
+            else {
+                New-Object System.Windows.GridLength -ArgumentList $width
+            }
+            $grid.ColumnDefinitions.Add($column) | Out-Null
+        }
+
+        $categoryBox = New-Object System.Windows.Controls.ComboBox
+        $categoryBox.DisplayMemberPath = "Label"
+        $categoryBox.Margin = New-Object System.Windows.Thickness -ArgumentList 0, 0, 10, 0
+        $categoryBox.Background = New-Brush $palette.Card
+        $categoryBox.Foreground = New-Brush $palette.Primary
+        $categoryBox.BorderBrush = New-Brush $palette.Border
+        $categoryBox.ToolTip = "Art der Pause"
+
+        foreach ($option in $pauseOptions) {
+            $categoryBox.Items.Add($option) | Out-Null
+        }
+
+        if ($null -eq $SelectedOption) {
+            $SelectedOption = $pauseOptions[0]
+        }
+
+        $categoryBox.SelectedItem = $SelectedOption
+        [System.Windows.Controls.Grid]::SetColumn($categoryBox, 0)
+        $grid.Children.Add($categoryBox) | Out-Null
+
+        $startBox = New-Object System.Windows.Controls.TextBox
+        $startBox.Text = [string]$Interval.Start
+        $startBox.Margin = New-Object System.Windows.Thickness -ArgumentList 0, 0, 10, 0
+        $startBox.Background = New-Brush $palette.Card
+        $startBox.Foreground = New-Brush $palette.Primary
+        $startBox.BorderBrush = New-Brush $palette.Border
+        $startBox.TextAlignment = [System.Windows.TextAlignment]::Center
+        $startBox.ToolTip = "Beginn im Format HH:mm"
+        [System.Windows.Controls.Grid]::SetColumn($startBox, 1)
+        $grid.Children.Add($startBox) | Out-Null
+
+        $endBox = New-Object System.Windows.Controls.TextBox
+        $endBox.Text = [string]$Interval.End
+        $endBox.Margin = New-Object System.Windows.Thickness -ArgumentList 0, 0, 8, 0
+        $endBox.Background = New-Brush $palette.Card
+        $endBox.Foreground = New-Brush $palette.Primary
+        $endBox.BorderBrush = New-Brush $palette.Border
+        $endBox.TextAlignment = [System.Windows.TextAlignment]::Center
+        $endBox.ToolTip = "Ende im Format HH:mm"
+        [System.Windows.Controls.Grid]::SetColumn($endBox, 2)
+        $grid.Children.Add($endBox) | Out-Null
+
+        $removeButton = New-Object System.Windows.Controls.Button
+        $removeButton.Content = [char]0x00D7
+        $removeButton.ToolTip = "Pausenzeit entfernen"
+
+        if ($null -ne $iconButtonStyle) {
+            $removeButton.Style = $iconButtonStyle
+        }
+
+        [System.Windows.Controls.Grid]::SetColumn($removeButton, 3)
+        $grid.Children.Add($removeButton) | Out-Null
+        $container.Child = $grid
+
+        $rowInfo = [PSCustomObject]@{
+            Container   = $container
+            CategoryBox = $categoryBox
+            StartBox    = $startBox
+            EndBox      = $endBox
+        }
+
+        $removeButton.Add_Click({
+            $pauseListPanel.Children.Remove($rowInfo.Container)
+            $pauseRows.Remove($rowInfo) | Out-Null
+            Update-CorrectionPauseState
+        })
+
+        $startBox.Add_TextChanged({ Update-CorrectionPauseState })
+        $endBox.Add_TextChanged({ Update-CorrectionPauseState })
+
+        $pauseRows.Add($rowInfo) | Out-Null
+        $pauseListPanel.Children.Add($container) | Out-Null
+        Update-CorrectionPauseState
+    }
+
+    foreach ($interval in $existingIntervals) {
+        $start = Get-PauseIntervalDateTime -Interval $interval -Name "Start"
+        $end = Get-PauseIntervalDateTime -Interval $interval -Name "End"
+
+        if ($null -eq $start -or $null -eq $end -or $end -le $start) {
+            continue
+        }
+
+        $selectedOption = $null
+
+        if ([string]$interval.Kind -eq "Auto") {
+            $selectedOption = $pauseOptions | Where-Object {
+                $_.Kind -eq "Auto" -and $_.Key -eq [string]$interval.Key
+            } | Select-Object -First 1
+        }
+
+        if ($null -eq $selectedOption) {
+            $selectedOption = $pauseOptions | Where-Object {
+                $_.Kind -eq "Auto" -and $_.Label -eq [string]$interval.Label
+            } | Select-Object -First 1
+        }
+
+        if ($null -eq $selectedOption) {
+            $selectedOption = $pauseOptions[0]
+        }
+
+        Add-CorrectionPauseRow `
+            -Interval ([PSCustomObject]@{
+                Start = $start.ToString("HH:mm")
+                End   = $end.ToString("HH:mm")
+            }) `
+            -SelectedOption $selectedOption
+    }
+
     $dialog.FindName("StartBox").Text = $values.StartTime
-    $dialog.FindName("MorningBox").Text = ([math]::Round((Get-StateDouble -State $state -Name "PauseMorningSeconds") / 60, 1)).ToString("0.0").Replace(".", ",")
-    $dialog.FindName("NoonBox").Text = ([math]::Round((Get-StateDouble -State $state -Name "PauseNoonSeconds") / 60, 1)).ToString("0.0").Replace(".", ",")
-    $dialog.FindName("ManualBox").Text = ([math]::Round($values.ManualPauseSeconds / 60, 1)).ToString("0.0").Replace(".", ",")
     $dialog.FindName("NoteBox").Text = [string]$values.Note
+
+    if ($pauseRows.Count -eq 0 -and [double]$values.TotalPauseSeconds -gt 0) {
+        $dialog.FindName("LegacyWarning").Visibility = [System.Windows.Visibility]::Visible
+    }
+
+    $dialog.FindName("AddPauseButton").Add_Click({
+        $now = Get-Date
+        $start = $now.AddMinutes(-15)
+
+        if ($start.Date -ne $now.Date) {
+            $start = $now.Date
+        }
+
+        Add-CorrectionPauseRow `
+            -Interval ([PSCustomObject]@{
+                Start = $start.ToString("HH:mm")
+                End   = $now.ToString("HH:mm")
+            }) `
+            -SelectedOption $pauseOptions[0]
+    })
 
     $dialog.FindName("CancelButton").Add_Click({
         $dialog.Close()
@@ -1537,12 +2181,85 @@ function Open-CorrectionWindow {
             return
         }
 
+        $correctedIntervals = @()
+        $validatedIntervals = @()
+        $now = Get-Date
+
+        foreach ($row in @($pauseRows)) {
+            $option = $row.CategoryBox.SelectedItem
+            $fromText = Convert-ToTimeText -TimeText ([string]$row.StartBox.Text)
+            $toText = Convert-ToTimeText -TimeText ([string]$row.EndBox.Text)
+
+            if ($null -eq $option) {
+                Show-Warning "Bitte für jede Pause eine Kategorie auswählen."
+                return
+            }
+
+            if ([string]::IsNullOrWhiteSpace($fromText) -or [string]::IsNullOrWhiteSpace($toText)) {
+                Show-Warning "Bitte Von und Bis im Format HH:mm eingeben."
+                return
+            }
+
+            $from = [datetime]::ParseExact(
+                ($workDate.ToString("yyyy-MM-dd") + " " + $fromText),
+                "yyyy-MM-dd HH:mm:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+            $to = [datetime]::ParseExact(
+                ($workDate.ToString("yyyy-MM-dd") + " " + $toText),
+                "yyyy-MM-dd HH:mm:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+
+            if ($to -le $from) {
+                Show-Warning "Bei jeder Pause muss Bis nach Von liegen."
+                return
+            }
+
+            if ($to -gt $now) {
+                Show-Warning "Eine Pause kann nicht in der Zukunft enden."
+                return
+            }
+
+            $validatedIntervals += [PSCustomObject]@{
+                Start = $from
+                End   = $to
+            }
+            $correctedIntervals += [PSCustomObject][ordered]@{
+                Kind  = [string]$option.Kind
+                Key   = [string]$option.Key
+                Label = [string]$option.Label
+                Start = $fromText
+                End   = $toText
+            }
+        }
+
+        $validatedIntervals = @($validatedIntervals | Sort-Object Start, End)
+
+        for ($index = 1; $index -lt $validatedIntervals.Count; $index++) {
+            if ($validatedIntervals[$index].Start -lt $validatedIntervals[$index - 1].End) {
+                Show-Warning "Pausenzeiten dürfen sich nicht überschneiden."
+                return
+            }
+        }
+
+        if ($correctedIntervals.Count -eq 0 -and [double]$values.TotalPauseSeconds -gt 0) {
+            $answer = [System.Windows.MessageBox]::Show(
+                "Alle vorhandenen Pausen werden für heute entfernt. Fortfahren?",
+                "Arbeitszeit",
+                [System.Windows.MessageBoxButton]::YesNo,
+                [System.Windows.MessageBoxImage]::Warning
+            )
+
+            if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
+                return
+            }
+        }
+
         $commandValues = [PSCustomObject][ordered]@{
-            StartTime           = $startTime
-            PauseMorningSeconds = (Convert-ToDouble $dialog.FindName("MorningBox").Text) * 60
-            PauseNoonSeconds    = (Convert-ToDouble $dialog.FindName("NoonBox").Text) * 60
-            ManualPauseSeconds  = (Convert-ToDouble $dialog.FindName("ManualBox").Text) * 60
-            Note                = $dialog.FindName("NoteBox").Text
+            StartTime     = $startTime
+            PauseIntervals = @($correctedIntervals)
+            Note          = $dialog.FindName("NoteBox").Text
         }
 
         Write-ControlCommand -Action "UpdateToday" -Values $commandValues
@@ -1564,7 +2281,7 @@ function Open-SettingsWindow {
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Setup"
         Width="510"
-        Height="690"
+        Height="730"
         MinHeight="610"
         ResizeMode="CanResize"
         WindowStartupLocation="CenterOwner"
@@ -1583,8 +2300,9 @@ function Open-SettingsWindow {
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="42"/>
-                            <RowDefinition Height="42"/>
+                             <RowDefinition Height="42"/>
+                             <RowDefinition Height="42"/>
+                             <RowDefinition Height="42"/>
                             <RowDefinition Height="42"/>
                             <RowDefinition Height="42"/>
                             <RowDefinition Height="42"/>
@@ -1594,7 +2312,7 @@ function Open-SettingsWindow {
                         <TextBlock Text="Zielzeit netto (h)" Grid.Row="0" Foreground="#6E6E73" VerticalAlignment="Center"/>
                         <TextBox x:Name="TargetBox" Grid.Row="0" Grid.Column="1"/>
 
-                        <TextBlock Text="Wochenziel netto (h)" Grid.Row="1" Foreground="#6E6E73" VerticalAlignment="Center"/>
+                        <TextBlock Text="Regelarbeitszeit/Woche (h)" Grid.Row="1" Foreground="#6E6E73" VerticalAlignment="Center"/>
                         <TextBox x:Name="WeekTargetBox" Grid.Row="1" Grid.Column="1"/>
 
                         <TextBlock Text="Messintervall (Sek.)" Grid.Row="2" Foreground="#6E6E73" VerticalAlignment="Center"/>
@@ -1603,9 +2321,12 @@ function Open-SettingsWindow {
                         <TextBlock Text="Idle-Schwelle (Sek.)" Grid.Row="3" Foreground="#6E6E73" VerticalAlignment="Center"/>
                         <TextBox x:Name="IdleBox" Grid.Row="3" Grid.Column="1"/>
 
-                        <CheckBox x:Name="NotifyTargetBox" Grid.Row="4" Grid.ColumnSpan="2" Content="Benachrichtigung bei Tagesziel" VerticalAlignment="Center"/>
+                        <TextBlock Text="Start-Offset (Min.)" Grid.Row="4" Foreground="#6E6E73" VerticalAlignment="Center"/>
+                        <TextBox x:Name="StartOffsetBox" Grid.Row="4" Grid.Column="1" ToolTip="Beginnt die Arbeitszeit um diese Minuten vor der ersten erkannten Aktivität."/>
 
-                        <CheckBox x:Name="TopMostBox" Grid.Row="5" Grid.ColumnSpan="2" Content="Anzeige immer oben halten" VerticalAlignment="Center"/>
+                        <CheckBox x:Name="NotifyTargetBox" Grid.Row="5" Grid.ColumnSpan="2" Content="Benachrichtigung bei Tagesziel" VerticalAlignment="Center"/>
+
+                        <CheckBox x:Name="TopMostBox" Grid.Row="6" Grid.ColumnSpan="2" Content="Anzeige immer oben halten" VerticalAlignment="Center"/>
                     </Grid>
                 </StackPanel>
             </Border>
@@ -1637,7 +2358,7 @@ function Open-SettingsWindow {
             </Border>
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-                <Button x:Name="CancelButton" Content="Abbrechen" Background="#8E8E93" Margin="0,0,10,0"/>
+                <Button x:Name="CancelButton" Content="Abbrechen" Margin="0,0,10,0"/>
                 <Button x:Name="SaveButton" Content="Speichern"/>
             </StackPanel>
         </StackPanel>
@@ -1768,6 +2489,7 @@ function Open-SettingsWindow {
     $dialog.FindName("WeekTargetBox").Text = ([double]$settings.WeekTargetHours).ToString("0.##").Replace(".", ",")
     $dialog.FindName("IntervalBox").Text = [string]$settings.IntervalSeconds
     $dialog.FindName("IdleBox").Text = [string]$settings.IdleThresholdSeconds
+    $dialog.FindName("StartOffsetBox").Text = [string]$settings.StartOffsetMinutes
     $dialog.FindName("NotifyTargetBox").IsChecked = [bool]$settings.NotifyTargetReached
     $dialog.FindName("TopMostBox").IsChecked = [bool]$settings.AlwaysOnTop
 
@@ -1780,6 +2502,7 @@ function Open-SettingsWindow {
         $weekTargetHours = Convert-ToDouble $dialog.FindName("WeekTargetBox").Text 40
         $intervalSeconds = [int](Convert-ToDouble $dialog.FindName("IntervalBox").Text 5)
         $idleSeconds = [int](Convert-ToDouble $dialog.FindName("IdleBox").Text 20)
+        $startOffsetMinutes = [int](Convert-ToDouble $dialog.FindName("StartOffsetBox").Text 0)
         $pauseWindows = @()
         $usedKeys = @{}
 
@@ -1819,6 +2542,7 @@ function Open-SettingsWindow {
         $newSettings = [PSCustomObject][ordered]@{
             IntervalSeconds     = $intervalSeconds
             IdleThresholdSeconds = $idleSeconds
+            StartOffsetMinutes  = $startOffsetMinutes
             TargetNetHours      = $targetHours
             WeekTargetHours     = $weekTargetHours
             AlwaysOnTop         = [bool]$dialog.FindName("TopMostBox").IsChecked
@@ -1844,6 +2568,7 @@ function Open-WeekWindow {
     )
 
     $data = Get-WeekReportData
+    $monthData = Get-MonthReportData -Values $data.Values
     $palette = Get-ThemePalette -Theme ([string]$data.Values.Settings.Theme)
     $bestText = "-"
 
@@ -1852,14 +2577,16 @@ function Open-WeekWindow {
     }
 
     $balanceColor = if ($data.BalanceSeconds -ge 0) { "#34C759" } else { "#FF3B30" }
+    $monthBalanceColor = if ($monthData.BalanceSeconds -ge 0) { "#34C759" } else { "#FF3B30" }
+    $overallBalanceColor = if ($monthData.OverallBalanceSeconds -ge 0) { "#34C759" } else { "#FF3B30" }
 
     $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Woche"
-        Width="760"
-        Height="760"
-        MinWidth="680"
+        Title="Arbeitszeitbericht"
+        Width="820"
+        Height="820"
+        MinWidth="720"
         MinHeight="620"
         ResizeMode="CanResize"
         WindowStartupLocation="CenterOwner"
@@ -1945,6 +2672,38 @@ function Open-WeekWindow {
                 </StackPanel>
             </Border>
 
+            <Border Margin="0,14,0,0" Padding="22" Background="$($palette.Card)" BorderBrush="$($palette.Border)" BorderThickness="1" CornerRadius="24">
+                <StackPanel>
+                    <TextBlock Text="Monat: $($monthData.MonthName)" FontSize="22" FontWeight="SemiBold" Foreground="$($palette.Primary)"/>
+                    <TextBlock Text="Bis $($monthData.PeriodEnd.ToString("dd.MM.yyyy")) · Regelarbeitszeit $($monthData.WeekTargetHours.ToString("0.##")) h/Woche" Margin="0,4,0,18" Foreground="$($palette.Secondary)"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="Netto Monat" Foreground="$($palette.Secondary)" FontSize="12" FontWeight="SemiBold"/>
+                            <TextBlock Text="$(Format-CompactDuration $monthData.TotalNetSeconds)" Foreground="$($palette.Primary)" FontSize="22" FontWeight="SemiBold"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1">
+                            <TextBlock Text="Soll bis heute" Foreground="$($palette.Secondary)" FontSize="12" FontWeight="SemiBold"/>
+                            <TextBlock Text="$(Format-CompactDuration $monthData.TargetToDateSeconds)" Foreground="$($palette.Primary)" FontSize="22" FontWeight="SemiBold"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="Monatssaldo" Foreground="$($palette.Secondary)" FontSize="12" FontWeight="SemiBold"/>
+                            <TextBlock Text="$(Format-CompactDuration $monthData.BalanceSeconds)" Foreground="$monthBalanceColor" FontSize="22" FontWeight="SemiBold"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="3">
+                            <TextBlock Text="Überstunden gesamt" Foreground="$($palette.Secondary)" FontSize="12" FontWeight="SemiBold"/>
+                            <TextBlock Text="$(Format-CompactDuration $monthData.OverallBalanceSeconds)" Foreground="$overallBalanceColor" FontSize="22" FontWeight="SemiBold"/>
+                        </StackPanel>
+                    </Grid>
+                    <TextBlock Text="Feiertage und Abwesenheiten werden in der Sollzeit nicht automatisch abgezogen." Margin="0,14,0,0" Foreground="$($palette.Secondary)" FontSize="11"/>
+                </StackPanel>
+            </Border>
+
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
                 <Button x:Name="ExportButton" Content="PDF" Margin="0,0,10,0"/>
                 <Button x:Name="CloseButton" Content="Schließen" Background="#8E8E93"/>
@@ -2025,6 +2784,11 @@ function Open-WeekWindow {
             $text.Foreground = New-Brush $(if ($i -eq 2) { $palette.Primary } else { $palette.Secondary })
             $text.FontWeight = if ($i -eq 2) { [System.Windows.FontWeights]::SemiBold } else { [System.Windows.FontWeights]::Normal }
             $text.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+            if ($i -eq 3 -and -not [string]::IsNullOrWhiteSpace([string]$day.PauseRanges)) {
+                $text.ToolTip = [string]$day.PauseRanges
+            }
+
             [System.Windows.Controls.Grid]::SetColumn($text, $i)
             $row.Children.Add($text) | Out-Null
         }
@@ -2048,9 +2812,9 @@ $mainXaml = @"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Arbeitszeit"
         Width="560"
-        Height="820"
+        Height="850"
         MinWidth="520"
-        MinHeight="760"
+        MinHeight="790"
         ResizeMode="CanResize"
         WindowStartupLocation="Manual"
         Background="#F5F5F7"
@@ -2075,11 +2839,14 @@ $mainXaml = @"
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Background" Value="#007AFF"/>
             <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="Root" Background="{TemplateBinding Background}" CornerRadius="20">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -2152,6 +2919,7 @@ $mainXaml = @"
                     <RowDefinition Height="36"/>
                     <RowDefinition Height="36"/>
                     <RowDefinition Height="36"/>
+                    <RowDefinition Height="36"/>
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -2168,8 +2936,10 @@ $mainXaml = @"
                 <TextBlock x:Name="AutoPauseText" Grid.Row="3" Grid.Column="1" Foreground="#1C1C1E" FontSize="15" FontWeight="SemiBold"/>
                 <TextBlock Text="Pause manuell" Grid.Row="4" Foreground="#6E6E73" FontSize="14"/>
                 <TextBlock x:Name="ManualPauseText" Grid.Row="4" Grid.Column="1" Foreground="#1C1C1E" FontSize="15" FontWeight="SemiBold"/>
-                <TextBlock Text="Aktualisiert" Grid.Row="5" Foreground="#6E6E73" FontSize="14"/>
-                <TextBlock x:Name="UpdatedText" Grid.Row="5" Grid.Column="1" Foreground="#1C1C1E" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Text="Pausenzeiten" Grid.Row="5" Foreground="#6E6E73" FontSize="14"/>
+                <TextBlock x:Name="PauseIntervalsText" Grid.Row="5" Grid.Column="1" Foreground="#1C1C1E" FontSize="13" FontWeight="SemiBold" MaxWidth="320" TextTrimming="CharacterEllipsis" HorizontalAlignment="Right"/>
+                <TextBlock Text="Aktualisiert" Grid.Row="6" Foreground="#6E6E73" FontSize="14"/>
+                <TextBlock x:Name="UpdatedText" Grid.Row="6" Grid.Column="1" Foreground="#1C1C1E" FontSize="15" FontWeight="SemiBold"/>
             </Grid>
         </Border>
 
@@ -2191,7 +2961,7 @@ $mainXaml = @"
             <Button x:Name="ResumeButton" Grid.Column="2" Content="Weiter" Style="{StaticResource PillButton}" Background="#34C759"/>
             <Button x:Name="EditButton" Grid.Column="4" Content="Korrigieren" Style="{StaticResource PillButton}" Background="#3A3A3C"/>
             <Button x:Name="CsvButton" Grid.Column="6" Content="CSV" Style="{StaticResource PillButton}" Background="#3A3A3C"/>
-            <Button x:Name="WeekButton" Grid.Column="8" Content="Woche" Style="{StaticResource PillButton}" Background="#5856D6"/>
+            <Button x:Name="WeekButton" Grid.Column="8" Content="Bericht" Style="{StaticResource PillButton}" Background="#5856D6"/>
             <Button x:Name="ThemeButton" Grid.Column="10" Content="Dark" Style="{StaticResource PillButton}" Background="#3A3A3C"/>
         </Grid>
 
@@ -2274,6 +3044,7 @@ $endText = $mainWindow.FindName("EndText")
 $grossText = $mainWindow.FindName("GrossText")
 $autoPauseText = $mainWindow.FindName("AutoPauseText")
 $manualPauseText = $mainWindow.FindName("ManualPauseText")
+$pauseIntervalsText = $mainWindow.FindName("PauseIntervalsText")
 $updatedText = $mainWindow.FindName("UpdatedText")
 $pauseButton = $mainWindow.FindName("PauseButton")
 $resumeButton = $mainWindow.FindName("ResumeButton")
@@ -2565,6 +3336,8 @@ function Update-Ui {
     $grossText.Text = Format-Duration $values.GrossSeconds
     $autoPauseText.Text = Format-Duration $values.AutoPauseSeconds
     $manualPauseText.Text = Format-Duration $values.ManualPauseSeconds
+    $pauseIntervalsText.Text = if ([string]::IsNullOrWhiteSpace([string]$values.PauseIntervalsText)) { "-" } else { [string]$values.PauseIntervalsText }
+    $pauseIntervalsText.ToolTip = $pauseIntervalsText.Text
     $updatedText.Text = $values.UpdatedText
     $activitySummary = Get-TodayWorkEntrySummary
     $activityStatusText.Text = "{0} Einträge · {1:N2} h" -f $activitySummary.Count, $activitySummary.Hours
@@ -2671,8 +3444,8 @@ $weekButton.Add_Click({
         Open-WeekWindow -Owner $mainWindow
     }
     catch {
-        Write-AppLog ("Woche-Fehler: " + $_.Exception.ToString())
-        Show-Warning "Die Wochenübersicht konnte nicht geöffnet werden. Details stehen im Log."
+        Write-AppLog ("Bericht-Fehler: " + $_.Exception.ToString())
+        Show-Warning "Der Arbeitszeitbericht konnte nicht geöffnet werden. Details stehen im Log."
     }
 })
 

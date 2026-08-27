@@ -7,7 +7,7 @@
         return $null
     }
 
-    $formats = @("HH:mm:ss", "HH:mm")
+    $formats = @("HH:mm:ss", "H:mm:ss", "HH:mm", "H:mm")
     $parsed = [datetime]::MinValue
 
     foreach ($format in $formats) {
@@ -96,6 +96,7 @@ function New-ArbeitszeitDefaultSettings {
     return [PSCustomObject][ordered]@{
         IntervalSeconds     = $IntervalSeconds
         IdleThresholdSeconds = $IdleThresholdSeconds
+        StartOffsetMinutes  = 0
         TargetNetHours      = 8.0
         WeekTargetHours     = 40.0
         AlwaysOnTop         = $true
@@ -305,6 +306,7 @@ function Ensure-ArbeitszeitSettings {
     return [PSCustomObject][ordered]@{
         IntervalSeconds     = [int](Get-ArbeitszeitSettingNumber -Settings $Settings -Name "IntervalSeconds" -DefaultValue $defaults.IntervalSeconds -MinValue 1 -MaxValue 60)
         IdleThresholdSeconds = [int](Get-ArbeitszeitSettingNumber -Settings $Settings -Name "IdleThresholdSeconds" -DefaultValue $defaults.IdleThresholdSeconds -MinValue 1 -MaxValue 600)
+        StartOffsetMinutes  = [int](Get-ArbeitszeitSettingNumber -Settings $Settings -Name "StartOffsetMinutes" -DefaultValue $defaults.StartOffsetMinutes -MinValue 0 -MaxValue 240)
         TargetNetHours      = [double](Get-ArbeitszeitSettingNumber -Settings $Settings -Name "TargetNetHours" -DefaultValue $defaults.TargetNetHours -MinValue 0.5 -MaxValue 24)
         WeekTargetHours     = [double](Get-ArbeitszeitSettingNumber -Settings $Settings -Name "WeekTargetHours" -DefaultValue $defaults.WeekTargetHours -MinValue 1 -MaxValue 100)
         AlwaysOnTop         = $alwaysOnTop

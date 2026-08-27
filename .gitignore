@@ -9,6 +9,10 @@ settings.json
 state.json
 control.json
 notification-state.json
+notification.json
+reports/
+*.bak
+*.tmp
 
 # Laufzeitprotokolle und generierte Hosts
 *.log

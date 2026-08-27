@@ -170,7 +170,7 @@ function Convert-ToTimeText {
         return $null
     }
 
-    $formats = @("HH:mm:ss", "HH:mm")
+    $formats = @("HH:mm:ss", "H:mm:ss", "HH:mm", "H:mm")
     $parsed = [datetime]::MinValue
 
     foreach ($format in $formats) {
@@ -186,6 +186,22 @@ function Convert-ToTimeText {
     }
 
     return $null
+}
+
+function Get-OffsetStartDateTime {
+    param(
+        [datetime]$StartCandidate,
+        [datetime]$Now,
+        [int]$StartOffsetMinutes
+    )
+
+    $effectiveStart = $StartCandidate.AddMinutes(-1 * [math]::Max(0, $StartOffsetMinutes))
+
+    if ($effectiveStart.Date -ne $Now.Date) {
+        return $Now.Date
+    }
+
+    return $effectiveStart
 }
 
 function Get-WorkDate {
@@ -269,6 +285,7 @@ function New-DayState {
         ManualPauseActive        = $false
         ManualPauseStartedAt     = ""
         ManualPauseCountedUntil  = ""
+        PauseIntervals           = @()
 
         Note                     = ""
         LastControlId            = ""
@@ -301,6 +318,7 @@ function Ensure-StateProperties {
     $State = Ensure-Property -Object $State -Name "ManualPauseActive" -Value $false
     $State = Ensure-Property -Object $State -Name "ManualPauseStartedAt" -Value ""
     $State = Ensure-Property -Object $State -Name "ManualPauseCountedUntil" -Value ""
+    $State = Ensure-Property -Object $State -Name "PauseIntervals" -Value @()
     $State = Ensure-Property -Object $State -Name "StartPending" -Value $false
     $State = Ensure-Property -Object $State -Name "StartCandidateAt" -Value ""
     $State = Ensure-Property -Object $State -Name "Note" -Value ""
@@ -398,6 +416,157 @@ function Get-PauseCsvColumnName {
     return "Pause_$key"
 }
 
+function Get-PauseIntervalDateTime {
+    param(
+        $Interval,
+        [string]$Name
+    )
+
+    if ($null -eq $Interval -or $Interval.PSObject.Properties.Name -notcontains $Name) {
+        return $null
+    }
+
+    try {
+        return [datetime]::Parse([string]$Interval.$Name)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Add-PauseInterval {
+    param(
+        $State,
+        [string]$Kind,
+        [string]$Key,
+        [string]$Label,
+        [datetime]$From,
+        [datetime]$To
+    )
+
+    if ($To -le $From) {
+        return $State
+    }
+
+    $State = Ensure-Property -Object $State -Name "PauseIntervals" -Value @()
+    $intervals = @($State.PauseIntervals | Where-Object { $null -ne $_ })
+    $last = $intervals | Select-Object -Last 1
+    $canMerge = $false
+
+    if ($null -ne $last) {
+        $lastEnd = Get-PauseIntervalDateTime -Interval $last -Name "End"
+        $lastKind = if ($last.PSObject.Properties.Name -contains "Kind") { [string]$last.Kind } else { "" }
+        $lastKey = if ($last.PSObject.Properties.Name -contains "Key") { [string]$last.Key } else { "" }
+
+        $canMerge = $null -ne $lastEnd -and
+            $lastKind -eq $Kind -and
+            $lastKey -eq $Key -and
+            $From -le $lastEnd.AddSeconds(1)
+    }
+
+    if ($canMerge) {
+        if ($To -gt $lastEnd) {
+            $last.End = $To.ToString("o")
+        }
+    }
+    else {
+        $intervals += [PSCustomObject][ordered]@{
+            Kind  = $Kind
+            Key   = $Key
+            Label = $Label
+            Start = $From.ToString("o")
+            End   = $To.ToString("o")
+        }
+    }
+
+    $State.PauseIntervals = @($intervals)
+    return $State
+}
+
+function Format-PauseIntervals {
+    param(
+        $Intervals
+    )
+
+    $parts = @()
+
+    foreach ($interval in @($Intervals)) {
+        $start = Get-PauseIntervalDateTime -Interval $interval -Name "Start"
+        $end = Get-PauseIntervalDateTime -Interval $interval -Name "End"
+
+        if ($null -eq $start -or $null -eq $end -or $end -le $start) {
+            continue
+        }
+
+        $label = if ($interval.PSObject.Properties.Name -contains "Label") { [string]$interval.Label } else { "" }
+
+        if ([string]::IsNullOrWhiteSpace($label)) {
+            $label = if ($interval.PSObject.Properties.Name -contains "Kind") { [string]$interval.Kind } else { "Pause" }
+        }
+
+        $parts += ("{0}-{1} ({2})" -f $start.ToString("HH:mm"), $end.ToString("HH:mm"), $label)
+    }
+
+    return ($parts -join "; ")
+}
+
+function ConvertFrom-PauseIntervalsText {
+    param(
+        [string]$Text,
+        [datetime]$Date
+    )
+
+    $intervals = @()
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $intervals
+    }
+
+    foreach ($part in @($Text -split ";")) {
+        if ($part -notmatch '^\s*(?<start>\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(?<end>\d{1,2}:\d{2}(?::\d{2})?)(?:\s*\((?<label>[^)]*)\))?\s*$') {
+            continue
+        }
+
+        $startText = Convert-ToTimeText -TimeText $matches.start
+        $endText = Convert-ToTimeText -TimeText $matches.end
+
+        if ([string]::IsNullOrWhiteSpace($startText) -or [string]::IsNullOrWhiteSpace($endText)) {
+            continue
+        }
+
+        $start = [datetime]::ParseExact(
+            ($Date.ToString("yyyy-MM-dd") + " " + $startText),
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+        $end = [datetime]::ParseExact(
+            ($Date.ToString("yyyy-MM-dd") + " " + $endText),
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+
+        if ($end -le $start) {
+            continue
+        }
+
+        $label = [string]$matches.label
+
+        if ([string]::IsNullOrWhiteSpace($label)) {
+            $label = "Pause"
+        }
+
+        $intervals += [PSCustomObject][ordered]@{
+            Kind  = "Imported"
+            Key   = "Imported"
+            Label = $label.Trim()
+            Start = $start.ToString("o")
+            End   = $end.ToString("o")
+        }
+    }
+
+    return $intervals
+}
+
 function Save-State {
     param($State)
 
@@ -450,6 +619,7 @@ function Recover-StateFromCsv {
         $state.PauseMorningSeconds = Convert-DurationTextToSeconds ([string]$row.Pause_08_55_09_35)
         $state.PauseNoonSeconds = Convert-DurationTextToSeconds ([string]$row.Pause_11_55_12_45)
         $state.ManualPauseSeconds = Convert-DurationTextToSeconds ([string]$row.Pause_Manuell)
+        $state.PauseIntervals = @(ConvertFrom-PauseIntervalsText -Text ([string]$row.Pausen_Zeitraeume) -Date $Now.Date)
         $state.Note = [string]$row.Notiz
         $state.LastTimestamp = $Now.ToString("o")
 
@@ -579,6 +749,13 @@ function Add-PauseOverlap {
 
         $State.$secondsProperty = [double]$State.$secondsProperty + $addSeconds
         $State.$countedProperty = $to.ToString("o")
+        $State = Add-PauseInterval `
+            -State $State `
+            -Kind "Auto" `
+            -Key ([string]$Pause.Key) `
+            -Label ([string]$Pause.Label) `
+            -From $from `
+            -To $to
     }
 
     return $State
@@ -616,6 +793,13 @@ function Add-ManualPauseUntil {
     if ($to -gt $from) {
         $State.ManualPauseSeconds = [double]$State.ManualPauseSeconds + ($to - $from).TotalSeconds
         $State.ManualPauseCountedUntil = $to.ToString("o")
+        $State = Add-PauseInterval `
+            -State $State `
+            -Kind "Manual" `
+            -Key "Manual" `
+            -Label "Manuell" `
+            -From $from `
+            -To $to
     }
 
     return $State
@@ -639,6 +823,129 @@ function Get-EditedPauseCountedUntil {
     }
 
     return $Now.ToString("o")
+}
+
+function Apply-CorrectedPauseIntervals {
+    param(
+        $State,
+        $Intervals,
+        [datetime]$Now,
+        $Settings
+    )
+
+    $workDate = Get-WorkDate -DateText ([string]$State.Date)
+
+    if ($null -eq $workDate) {
+        return $State
+    }
+
+    $pauseWindows = @(Get-ArbeitszeitPauseWindows -Settings $Settings -IncludeDisabled)
+    $normalized = @()
+
+    foreach ($source in @($Intervals)) {
+        if ($null -eq $source) {
+            continue
+        }
+
+        $startText = Convert-ToTimeText -TimeText ([string]$source.Start)
+        $endText = Convert-ToTimeText -TimeText ([string]$source.End)
+
+        if ([string]::IsNullOrWhiteSpace($startText) -or [string]::IsNullOrWhiteSpace($endText)) {
+            return $State
+        }
+
+        $start = [datetime]::ParseExact(
+            ($workDate.ToString("yyyy-MM-dd") + " " + $startText),
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+        $end = [datetime]::ParseExact(
+            ($workDate.ToString("yyyy-MM-dd") + " " + $endText),
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+
+        if ($end -le $start -or $end -gt $Now) {
+            return $State
+        }
+
+        $kind = [string]$source.Kind
+        $key = [string]$source.Key
+        $pause = $null
+
+        if ($kind -eq "Auto") {
+            $pause = $pauseWindows | Where-Object { [string]$_.Key -eq $key } | Select-Object -First 1
+        }
+
+        if ($null -eq $pause) {
+            $kind = "Manual"
+            $key = "Manual"
+            $label = "Manuell"
+        }
+        else {
+            $kind = "Auto"
+            $key = [string]$pause.Key
+            $label = [string]$pause.Label
+        }
+
+        $normalized += [PSCustomObject][ordered]@{
+            Kind  = $kind
+            Key   = $key
+            Label = $label
+            Start = $start
+            End   = $end
+        }
+    }
+
+    $normalized = @($normalized | Sort-Object Start, End)
+
+    for ($index = 1; $index -lt $normalized.Count; $index++) {
+        if ($normalized[$index].Start -lt $normalized[$index - 1].End) {
+            return $State
+        }
+    }
+
+    foreach ($pause in $pauseWindows) {
+        $State = Ensure-Property -Object $State -Name $pause.SecondsProperty -Value 0
+        $State = Ensure-Property -Object $State -Name $pause.CountedProperty -Value ""
+        $State.($pause.SecondsProperty) = 0
+        $State.($pause.CountedProperty) = Get-EditedPauseCountedUntil -Now $Now -Pause $pause
+    }
+
+    $State.ManualPauseSeconds = 0
+    $storedIntervals = @()
+
+    foreach ($interval in $normalized) {
+        $seconds = ($interval.End - $interval.Start).TotalSeconds
+
+        if ($interval.Kind -eq "Auto") {
+            $pause = $pauseWindows | Where-Object { [string]$_.Key -eq [string]$interval.Key } | Select-Object -First 1
+
+            if ($null -ne $pause) {
+                $State.($pause.SecondsProperty) = [double]$State.($pause.SecondsProperty) + $seconds
+            }
+        }
+        else {
+            $State.ManualPauseSeconds = [double]$State.ManualPauseSeconds + $seconds
+        }
+
+        $storedIntervals += [PSCustomObject][ordered]@{
+            Kind  = [string]$interval.Kind
+            Key   = [string]$interval.Key
+            Label = [string]$interval.Label
+            Start = $interval.Start.ToString("o")
+            End   = $interval.End.ToString("o")
+        }
+    }
+
+    $State.PauseIntervals = @($storedIntervals)
+
+    if ([bool]$State.ManualPauseActive) {
+        $State.ManualPauseStartedAt = $Now.ToString("o")
+        $State.ManualPauseCountedUntil = $Now.ToString("o")
+    }
+
+    return $State
 }
 
 function Get-NumberValue {
@@ -934,9 +1241,19 @@ function Apply-ControlCommand {
                     }
                 }
 
-                $State.PauseMorningSeconds = Get-NumberValue -Values $values -Name "PauseMorningSeconds" -DefaultValue ([double]$State.PauseMorningSeconds)
-                $State.PauseNoonSeconds = Get-NumberValue -Values $values -Name "PauseNoonSeconds" -DefaultValue ([double]$State.PauseNoonSeconds)
-                $State.ManualPauseSeconds = Get-NumberValue -Values $values -Name "ManualPauseSeconds" -DefaultValue ([double]$State.ManualPauseSeconds)
+                if ($values.PSObject.Properties.Name -contains "PauseIntervals") {
+                    $State = Apply-CorrectedPauseIntervals `
+                        -State $State `
+                        -Intervals $values.PauseIntervals `
+                        -Now $Now `
+                        -Settings $Settings
+                }
+                else {
+                    # Kompatibilität mit älteren Anzeige-Versionen, die nur Summen senden.
+                    $State.PauseMorningSeconds = Get-NumberValue -Values $values -Name "PauseMorningSeconds" -DefaultValue ([double]$State.PauseMorningSeconds)
+                    $State.PauseNoonSeconds = Get-NumberValue -Values $values -Name "PauseNoonSeconds" -DefaultValue ([double]$State.PauseNoonSeconds)
+                    $State.ManualPauseSeconds = Get-NumberValue -Values $values -Name "ManualPauseSeconds" -DefaultValue ([double]$State.ManualPauseSeconds)
+                }
 
                 if ($values.PSObject.Properties.Name -contains "Note") {
                     $State.Note = [string]$values.Note
@@ -1041,7 +1358,8 @@ function Write-DayToCsv {
         "Taetigkeiten_Anzahl",
         "Taetigkeiten_Details",
         "Status",
-        "Notiz"
+        "Notiz",
+        "Pausen_Zeitraeume"
     )
 
     $rowValues = [ordered]@{
@@ -1066,6 +1384,7 @@ function Write-DayToCsv {
     $rowValues["Taetigkeiten_Details"] = [string]$activitySummary.Details
     $rowValues["Status"] = $status
     $rowValues["Notiz"] = [string]$State.Note
+    $rowValues["Pausen_Zeitraeume"] = Format-PauseIntervals -Intervals $State.PauseIntervals
 
     $row = [PSCustomObject]$rowValues
 
@@ -1241,11 +1560,16 @@ function Update-StateOnce {
             return $State
         }
 
+        $effectiveStart = Get-OffsetStartDateTime `
+            -StartCandidate $startCandidate `
+            -Now $now `
+            -StartOffsetMinutes ([int]$Settings.StartOffsetMinutes)
+
         $State.StartPending = $false
         $State.StartCandidateAt = ""
-        $State.StartTime = $startCandidate.ToString("HH:mm:ss")
+        $State.StartTime = $effectiveStart.ToString("HH:mm:ss")
         $State.EndTime = $now.ToString("HH:mm:ss")
-        $State.GrossSeconds = [math]::Max(0, ($now - $startCandidate).TotalSeconds)
+        $State.GrossSeconds = [math]::Max(0, ($now - $effectiveStart).TotalSeconds)
         $State.LastTimestamp = $now.ToString("o")
         return $State
     }
