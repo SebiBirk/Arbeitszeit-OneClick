@@ -298,12 +298,20 @@ function Merge-PauseIntervals {
             Kind  = [string]$interval.Kind
             Key   = [string]$interval.Key
             Label = [string]$interval.Label
-            Start = $interval.Start.ToString("o")
-            End   = $interval.End.ToString("o")
+            Start = $interval.Start
+            End   = $interval.End
         }
     }
 
-    return @($merged)
+    return @($merged | ForEach-Object {
+        [PSCustomObject][ordered]@{
+            Kind  = [string]$_.Kind
+            Key   = [string]$_.Key
+            Label = [string]$_.Label
+            Start = $_.Start.ToString("o")
+            End   = $_.End.ToString("o")
+        }
+    })
 }
 
 function Format-PauseIntervals {

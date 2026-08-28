@@ -5,6 +5,7 @@ $trackerPath = Join-Path $repoRoot "Arbeitszeit.ps1"
 $displayPath = Join-Path $repoRoot "ArbeitszeitAnzeige.ps1"
 $legacyDisplayPath = Join-Path $repoRoot "ArbeitszeitAnzeige.hta"
 $settingsPath = Join-Path $repoRoot "ArbeitszeitSettings.ps1"
+$oneClickInstallerPath = Join-Path $repoRoot "Install-Arbeitszeit-OneClick.ps1"
 $script:Assertions = 0
 
 function Assert-True {
@@ -120,6 +121,43 @@ Assert-Equal 40 ([double]$normalizedSettings.WeekTargetHours) "Die Regelarbeitsz
 $legacySettings | Add-Member -NotePropertyName StartOffsetMinutes -NotePropertyValue 3
 $normalizedSettings = Ensure-ArbeitszeitSettings -Settings $legacySettings
 Assert-Equal 3 $normalizedSettings.StartOffsetMinutes "Start-Offset wird aus Settings übernommen"
+
+Import-FunctionsFromFile -Path $oneClickInstallerPath -Names @(
+    "Get-InstallDataScore",
+    "Resolve-ArbeitszeitInstallDir"
+)
+
+$installerTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ArbeitszeitInstallerTests_" + [guid]::NewGuid().ToString("N"))
+$installerTestRoot = [System.IO.Path]::GetFullPath($installerTestRoot)
+$installerTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+
+if (-not $installerTestRoot.StartsWith($installerTempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unsicherer Installer-Testpfad: $installerTestRoot"
+}
+
+$preferredInstall = Join-Path $installerTestRoot "Preferred"
+$legacyInstall = Join-Path $installerTestRoot "Legacy"
+New-Item -ItemType Directory -Path $preferredInstall, $legacyInstall -Force | Out-Null
+
+try {
+    [PSCustomObject]@{ Datum = "2026-08-27" } |
+        Export-Csv -LiteralPath (Join-Path $preferredInstall "Arbeitszeiten.csv") -Delimiter ";" -NoTypeInformation
+    @(
+        [PSCustomObject]@{ Datum = "2026-08-26" },
+        [PSCustomObject]@{ Datum = "2026-08-27" }
+    ) | Export-Csv -LiteralPath (Join-Path $legacyInstall "Arbeitszeiten.csv") -Delimiter ";" -NoTypeInformation
+
+    $selectedInstall = Resolve-ArbeitszeitInstallDir -RequestedPath "" -PreferredPath $preferredInstall -LegacyPath $legacyInstall
+    Assert-Equal ([System.IO.Path]::GetFullPath($legacyInstall)) $selectedInstall "OneClick aktualisiert die Installation mit der größeren Datenhistorie"
+
+    $explicitInstall = Resolve-ArbeitszeitInstallDir -RequestedPath $preferredInstall -PreferredPath $preferredInstall -LegacyPath $legacyInstall
+    Assert-Equal ([System.IO.Path]::GetFullPath($preferredInstall)) $explicitInstall "Explizit gewählter Installationsordner hat Vorrang"
+}
+finally {
+    if (Test-Path -LiteralPath $installerTestRoot) {
+        Remove-Item -LiteralPath $installerTestRoot -Recurse -Force
+    }
+}
 
 Import-FunctionsFromFile -Path $trackerPath -Names @(
     "Convert-ToTimeText",
@@ -508,6 +546,11 @@ Import-FunctionsFromFile -Path $displayPath -Names @(
     "Merge-PauseIntervals",
     "Set-CorrectionInputAppearance"
 )
+
+$displayMergedDuplicates = @(Merge-PauseIntervals -Intervals $duplicateIntervals)
+Assert-Equal 1 $displayMergedDuplicates.Count "Anzeige führt mehrere angrenzende Pausen ohne Datentypfehler zusammen"
+Assert-Equal "09:06" ([datetime]$displayMergedDuplicates[0].Start).ToString("HH:mm") "Anzeige behält beim Zusammenführen den ersten Beginn"
+Assert-Equal "09:28" ([datetime]$displayMergedDuplicates[0].End).ToString("HH:mm") "Anzeige behält beim Zusammenführen das letzte Ende"
 
 $correctionTimeBox = New-Object System.Windows.Controls.TextBox
 Set-CorrectionInputAppearance -Control $correctionTimeBox -TimeMaxLength 5

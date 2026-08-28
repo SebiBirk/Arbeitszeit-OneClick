@@ -37,6 +37,12 @@ Die OneClick-Installation verwendet standardmäßig diesen Ordner:
 %LOCALAPPDATA%\Arbeitszeit
 ```
 
+Bei einer Aktualisierung erkennt der Installer vorhandene Installationen unter
+`%LOCALAPPDATA%\Arbeitszeit` und `C:\Arbeitszeit`. Falls beide existieren, wird
+automatisch die Installation mit der größeren CSV-Datenhistorie aktualisiert;
+parallel laufende alte Programmprozesse werden beendet, die alten Datendateien
+jedoch nicht gelöscht.
+
 Sie richtet den Autostart für Tracker und Anzeige ein, erstellt Verknüpfungen
 im Startmenü sowie auf dem Desktop und startet die Anwendung direkt.
 

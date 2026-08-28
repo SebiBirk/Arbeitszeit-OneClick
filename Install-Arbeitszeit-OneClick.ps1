@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Arbeitszeit"),
+    [string]$InstallDir = "",
     [switch]$NoDesktopShortcut
 )
 
@@ -8,8 +8,77 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 
 $sourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $logPath = Join-Path $env:TEMP "Arbeitszeit-Setup.log"
+
+function Get-InstallDataScore {
+    param([string]$Path)
+
+    $csvPath = Join-Path $Path "Arbeitszeiten.csv"
+    $rowCount = 0
+    $lastWrite = [datetime]::MinValue
+
+    if (Test-Path -LiteralPath $csvPath) {
+        try {
+            $rowCount = @(Import-Csv -LiteralPath $csvPath -Delimiter ";").Count
+            $lastWrite = (Get-Item -LiteralPath $csvPath).LastWriteTime
+        }
+        catch {}
+    }
+
+    return [PSCustomObject]@{
+        Path      = [System.IO.Path]::GetFullPath($Path)
+        RowCount  = $rowCount
+        LastWrite = $lastWrite
+    }
+}
+
+function Resolve-ArbeitszeitInstallDir {
+    param(
+        [string]$RequestedPath,
+        [string]$PreferredPath = (Join-Path $env:LOCALAPPDATA "Arbeitszeit"),
+        [string]$LegacyPath = "C:\Arbeitszeit"
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
+        return [System.IO.Path]::GetFullPath($RequestedPath)
+    }
+
+    $existing = @(@($PreferredPath, $LegacyPath) | Where-Object {
+        (Test-Path -LiteralPath (Join-Path $_ "Arbeitszeiten.csv")) -or
+            (Test-Path -LiteralPath (Join-Path $_ "state.json")) -or
+            (Test-Path -LiteralPath (Join-Path $_ "ArbeitszeitAnzeige.exe"))
+    })
+
+    if ($existing.Count -eq 0) {
+        return [System.IO.Path]::GetFullPath($PreferredPath)
+    }
+
+    $selected = @($existing | ForEach-Object { Get-InstallDataScore -Path $_ } |
+        Sort-Object -Property @{ Expression = "RowCount"; Descending = $true }, @{ Expression = "LastWrite"; Descending = $true }) |
+        Select-Object -First 1
+
+    return [string]$selected.Path
+}
+
+function Stop-OtherArbeitszeitInstances {
+    param([string]$SelectedInstallDir)
+
+    $selected = [System.IO.Path]::GetFullPath($SelectedInstallDir).TrimEnd("\")
+
+    Get-CimInstance Win32_Process -Filter "Name='ArbeitszeitAnzeige.exe' OR Name='ArbeitszeitTracker.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
+                -not [System.IO.Path]::GetDirectoryName([string]$_.ExecutablePath).TrimEnd("\").Equals(
+                    $selected,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )
+        } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+}
+
+$InstallDir = Resolve-ArbeitszeitInstallDir -RequestedPath $InstallDir
 
 function Show-SetupMessage {
     param(
@@ -65,6 +134,8 @@ try {
 
     Write-Host "Installationsquelle: $sourceDir"
     Write-Host "Zielordner: $InstallDir"
+
+    Stop-OtherArbeitszeitInstances -SelectedInstallDir $InstallDir
 
     & powershell.exe `
         -NoProfile `
