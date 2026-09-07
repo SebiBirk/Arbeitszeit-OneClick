@@ -1948,6 +1948,91 @@ function Set-CorrectionInputAppearance {
     }
 }
 
+function Update-CorrectionPauseEditorState {
+    param($Context)
+
+    if ($null -eq $Context) {
+        return
+    }
+
+    if ($Context.Rows.Count -eq 0) {
+        $Context.EmptyPanel.Visibility = [System.Windows.Visibility]::Visible
+        $Context.SummaryText.Text = "00:00 Pause"
+        return
+    }
+
+    $Context.EmptyPanel.Visibility = [System.Windows.Visibility]::Collapsed
+    $totalSeconds = 0.0
+
+    foreach ($row in @($Context.Rows)) {
+        $startText = Convert-ToTimeText ([string]$row.StartBox.Text)
+        $endText = Convert-ToTimeText ([string]$row.EndBox.Text)
+
+        if ([string]::IsNullOrWhiteSpace($startText) -or [string]::IsNullOrWhiteSpace($endText)) {
+            continue
+        }
+
+        $start = [datetime]::ParseExact(
+            "$($Context.WorkDate.ToString('yyyy-MM-dd')) $startText",
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+        $end = [datetime]::ParseExact(
+            "$($Context.WorkDate.ToString('yyyy-MM-dd')) $endText",
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+
+        if ($end -gt $start) {
+            $totalSeconds += ($end - $start).TotalSeconds
+        }
+    }
+
+    $Context.SummaryText.Text = "$(Format-CompactDuration $totalSeconds) Pause"
+}
+
+function Register-CorrectionPauseRemoveButton {
+    param(
+        $Button,
+        $EditorContext,
+        $Row,
+        $Visual
+    )
+
+    $Button.Tag = [PSCustomObject]@{
+        EditorContext = $EditorContext
+        Row           = $Row
+        Visual        = $Visual
+    }
+
+    $Button.Add_Click({
+        param($sender, $eventArgs)
+
+        $removeContext = $sender.Tag
+
+        if ($null -eq $removeContext) {
+            return
+        }
+
+        $removeContext.EditorContext.Panel.Children.Remove($removeContext.Visual) | Out-Null
+        $removeContext.EditorContext.Rows.Remove($removeContext.Row) | Out-Null
+        Update-CorrectionPauseEditorState -Context $removeContext.EditorContext
+    })
+}
+
+function Register-CorrectionPauseRefresh {
+    param(
+        $Control,
+        $EditorContext
+    )
+
+    $Control.Tag = $EditorContext
+    $Control.Add_TextChanged({
+        param($sender, $eventArgs)
+        Update-CorrectionPauseEditorState -Context $sender.Tag
+    })
+}
+
 function Open-CorrectionWindow {
     param(
         $Owner
@@ -2113,48 +2198,18 @@ function Open-CorrectionWindow {
     $pauseSummaryText = $dialog.FindName("PauseSummaryText")
     $addPauseButton = $dialog.FindName("AddPauseButton")
     $iconButtonStyle = $dialog.Resources["DialogIconButton"]
+    $pauseEditorContext = [PSCustomObject]@{
+        Rows        = $pauseRows
+        Panel       = $pauseListPanel
+        EmptyPanel  = $emptyPausePanel
+        SummaryText = $pauseSummaryText
+        WorkDate    = $workDate
+    }
     $addPauseButton.Style = $dialog.Resources["DialogSecondaryButton"]
 
     foreach ($name in @("StartBox", "NoteBox")) {
         $textBox = $dialog.FindName($name)
         Set-CorrectionInputAppearance -Control $textBox -TimeMaxLength $(if ($name -eq "StartBox") { 8 } else { 0 })
-    }
-
-    function Update-CorrectionPauseState {
-        if ($pauseRows.Count -eq 0) {
-            $emptyPausePanel.Visibility = [System.Windows.Visibility]::Visible
-            $pauseSummaryText.Text = "00:00 Pause"
-            return
-        }
-
-        $emptyPausePanel.Visibility = [System.Windows.Visibility]::Collapsed
-        $totalSeconds = 0.0
-
-        foreach ($row in @($pauseRows)) {
-            $startText = Convert-ToTimeText ([string]$row.StartBox.Text)
-            $endText = Convert-ToTimeText ([string]$row.EndBox.Text)
-
-            if ([string]::IsNullOrWhiteSpace($startText) -or [string]::IsNullOrWhiteSpace($endText)) {
-                continue
-            }
-
-            $start = [datetime]::ParseExact(
-                "$($workDate.ToString('yyyy-MM-dd')) $startText",
-                "yyyy-MM-dd HH:mm:ss",
-                [System.Globalization.CultureInfo]::InvariantCulture
-            )
-            $end = [datetime]::ParseExact(
-                "$($workDate.ToString('yyyy-MM-dd')) $endText",
-                "yyyy-MM-dd HH:mm:ss",
-                [System.Globalization.CultureInfo]::InvariantCulture
-            )
-
-            if ($end -gt $start) {
-                $totalSeconds += ($end - $start).TotalSeconds
-            }
-        }
-
-        $pauseSummaryText.Text = "$(Format-CompactDuration $totalSeconds) Pause"
     }
 
     function Add-CorrectionPauseRow {
@@ -2239,20 +2294,20 @@ function Open-CorrectionWindow {
             EndBox      = $endBox
         }
 
-        $removeButton.Add_Click({
-            $pauseListPanel.Children.Remove($rowInfo.Container)
-            $pauseRows.Remove($rowInfo) | Out-Null
-            Update-CorrectionPauseState
-        })
+        Register-CorrectionPauseRemoveButton `
+            -Button $removeButton `
+            -EditorContext $pauseEditorContext `
+            -Row $rowInfo `
+            -Visual $container
 
-        $startBox.Add_TextChanged({ Update-CorrectionPauseState })
-        $endBox.Add_TextChanged({ Update-CorrectionPauseState })
+        Register-CorrectionPauseRefresh -Control $startBox -EditorContext $pauseEditorContext
+        Register-CorrectionPauseRefresh -Control $endBox -EditorContext $pauseEditorContext
         $startBox.Add_GotKeyboardFocus({ param($sender, $eventArgs) $sender.SelectAll() })
         $endBox.Add_GotKeyboardFocus({ param($sender, $eventArgs) $sender.SelectAll() })
 
         $pauseRows.Add($rowInfo) | Out-Null
         $pauseListPanel.Children.Add($container) | Out-Null
-        Update-CorrectionPauseState
+        Update-CorrectionPauseEditorState -Context $pauseEditorContext
     }
 
     foreach ($interval in $existingIntervals) {
@@ -2622,9 +2677,17 @@ function Open-SettingsWindow {
             RemoveButton = $removeButton
         }
 
+        $removeButton.Tag = [PSCustomObject]@{
+            Panel = $pauseListPanel
+            Rows  = $pauseRows
+            Row   = $rowInfo
+            Visual = $grid
+        }
         $removeButton.Add_Click({
-            $pauseListPanel.Children.Remove($rowInfo.Grid)
-            $pauseRows.Remove($rowInfo)
+            param($sender, $eventArgs)
+            $removeContext = $sender.Tag
+            $removeContext.Panel.Children.Remove($removeContext.Visual) | Out-Null
+            $removeContext.Rows.Remove($removeContext.Row) | Out-Null
         })
 
         $pauseRows.Add($rowInfo) | Out-Null

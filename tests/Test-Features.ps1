@@ -238,6 +238,28 @@ Assert-Equal 0 ([double]$corrected.PauseNoonSeconds) "Entfernte Pausenzeiträume
 Assert-Equal 900 ([double]$corrected.ManualPauseSeconds) "Manuelle Pausendauer wird aus Von-bis berechnet"
 Assert-Equal 2 @($corrected.PauseIntervals).Count "Korrigierte Von-bis-Zeiträume werden gespeichert"
 
+$deletePauseState = [PSCustomObject]@{
+    Date                     = "2026-08-27"
+    PauseMorningSeconds      = 660
+    PauseNoonSeconds         = 0
+    ManualPauseSeconds       = 0
+    PauseMorningCountedUntil = "2026-08-27T09:12:00"
+    PauseNoonCountedUntil    = ""
+    ManualPauseActive        = $false
+    ManualPauseStartedAt     = ""
+    ManualPauseCountedUntil  = ""
+    PauseIntervals           = @(
+        [PSCustomObject]@{ Kind = "Auto"; Key = "Morning"; Label = "Frühstück"; Start = "2026-08-27T09:01:00"; End = "2026-08-27T09:12:00" }
+    )
+}
+$deletedPauseState = Apply-CorrectedPauseIntervals `
+    -State $deletePauseState `
+    -Intervals @() `
+    -Now ([datetime]"2026-08-27T16:00:00") `
+    -Settings (New-ArbeitszeitDefaultSettings)
+Assert-Equal 0 @($deletedPauseState.PauseIntervals).Count "Eine vollständig gelöschte Pause bleibt beim Tracker gelöscht"
+Assert-Equal 0 ([double]$deletedPauseState.PauseMorningSeconds) "Löschen setzt auch die automatische Pausendauer zurück"
+
 $adjacentCorrectionState = [PSCustomObject]@{
     Date                     = "2026-08-27"
     PauseMorningSeconds      = 1320
@@ -544,7 +566,9 @@ Import-FunctionsFromFile -Path $displayPath -Names @(
     "Get-BrushText",
     "Apply-ThemeRecursive",
     "Merge-PauseIntervals",
-    "Set-CorrectionInputAppearance"
+    "Set-CorrectionInputAppearance",
+    "Update-CorrectionPauseEditorState",
+    "Register-CorrectionPauseRemoveButton"
 )
 
 $displayMergedDuplicates = @(Merge-PauseIntervals -Intervals $duplicateIntervals)
@@ -565,6 +589,50 @@ Set-CorrectionInputAppearance -Control $correctionCategoryBox
 $categoryRatio = Get-ContrastRatio -FirstColor (Convert-BrushToHex $correctionCategoryBox.Background) -SecondColor (Convert-BrushToHex $correctionCategoryBox.Foreground)
 Assert-True -Condition ($categoryRatio -ge 4.5) -Message "Kategorie-Auswahl besitzt auch im Darkmode ausreichenden Kontrast"
 Assert-True -Condition ($null -ne $correctionCategoryBox.ItemContainerStyle) -Message "Einträge der Kategorie-Auswahl erhalten explizite lesbare Farben"
+
+$removeRows = New-Object System.Collections.ArrayList
+$removePanel = New-Object System.Windows.Controls.StackPanel
+$removeEmptyPanel = New-Object System.Windows.Controls.Border
+$removeEmptyPanel.Visibility = [System.Windows.Visibility]::Collapsed
+$removeSummary = New-Object System.Windows.Controls.TextBlock
+$removeContext = [PSCustomObject]@{
+    Rows        = $removeRows
+    Panel       = $removePanel
+    EmptyPanel  = $removeEmptyPanel
+    SummaryText = $removeSummary
+    WorkDate    = [datetime]"2026-08-27"
+}
+$firstVisual = New-Object System.Windows.Controls.Border
+$secondVisual = New-Object System.Windows.Controls.Border
+$firstRemoveButton = New-Object System.Windows.Controls.Button
+$secondRemoveButton = New-Object System.Windows.Controls.Button
+$firstRemoveRow = [PSCustomObject]@{
+    Container = $firstVisual
+    StartBox  = [PSCustomObject]@{ Text = "09:00" }
+    EndBox    = [PSCustomObject]@{ Text = "09:10" }
+}
+$secondRemoveRow = [PSCustomObject]@{
+    Container = $secondVisual
+    StartBox  = [PSCustomObject]@{ Text = "10:00" }
+    EndBox    = [PSCustomObject]@{ Text = "10:05" }
+}
+$removeRows.Add($firstRemoveRow) | Out-Null
+$removeRows.Add($secondRemoveRow) | Out-Null
+$removePanel.Children.Add($firstVisual) | Out-Null
+$removePanel.Children.Add($secondVisual) | Out-Null
+Register-CorrectionPauseRemoveButton -Button $firstRemoveButton -EditorContext $removeContext -Row $firstRemoveRow -Visual $firstVisual
+Register-CorrectionPauseRemoveButton -Button $secondRemoveButton -EditorContext $removeContext -Row $secondRemoveRow -Visual $secondVisual
+
+$firstRemoveButton.RaiseEvent((New-Object System.Windows.RoutedEventArgs -ArgumentList ([System.Windows.Controls.Button]::ClickEvent)))
+Assert-Equal 1 $removeRows.Count "X entfernt genau eine Pausenzeile"
+Assert-True -Condition ([object]::ReferenceEquals($removeRows[0], $secondRemoveRow)) -Message "X entfernt die angeklickte und nicht die zuletzt erzeugte Zeile"
+Assert-Equal 1 $removePanel.Children.Count "X entfernt auch die sichtbare Pausenzeile"
+Assert-Equal "00:05 Pause" $removeSummary.Text "Pausensumme wird nach dem Löschen aktualisiert"
+
+$secondRemoveButton.RaiseEvent((New-Object System.Windows.RoutedEventArgs -ArgumentList ([System.Windows.Controls.Button]::ClickEvent)))
+Assert-Equal 0 $removeRows.Count "Auch die letzte vorhandene Pause kann gelöscht werden"
+Assert-Equal "00:00 Pause" $removeSummary.Text "Pausensumme wird nach vollständigem Löschen zurückgesetzt"
+Assert-Equal ([System.Windows.Visibility]::Visible) $removeEmptyPanel.Visibility "Leerzustand erscheint nach dem Löschen der letzten Pause"
 
 $dialogStylesReader = New-Object System.Xml.XmlNodeReader $dialogStylesXml
 $dialogResources = [System.Windows.Markup.XamlReader]::Load($dialogStylesReader)
