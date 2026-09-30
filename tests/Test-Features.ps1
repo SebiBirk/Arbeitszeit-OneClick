@@ -372,6 +372,101 @@ finally {
 }
 
 Import-FunctionsFromFile -Path $displayPath -Names @(
+    "Read-WorkEntries",
+    "Save-WorkEntries",
+    "Write-WorkEntriesCsv",
+    "Get-WorkEntriesForDate",
+    "Get-WorkEntrySummaryForDate",
+    "Get-DisplayPauseCsvColumnName",
+    "Read-WorkCsvRows",
+    "Update-WorkCsvActivityColumns",
+    "Add-WorkEntryLocal",
+    "Save-HistoricalWorkDay"
+)
+
+$historyTestDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ArbeitszeitHistoryTests_" + [guid]::NewGuid().ToString("N"))
+$historyTestDir = [System.IO.Path]::GetFullPath($historyTestDir)
+
+if (-not $historyTestDir.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unsicherer Historien-Testpfad: $historyTestDir"
+}
+
+New-Item -ItemType Directory -Path $historyTestDir -Force | Out-Null
+
+try {
+    $script:CsvPath = Join-Path $historyTestDir "Arbeitszeiten.csv"
+    $script:ActivityJsonPath = Join-Path $historyTestDir "taetigkeiten.json"
+    $script:ActivityCsvPath = Join-Path $historyTestDir "Arbeitszeit_Taetigkeiten.csv"
+    $script:LogPath = Join-Path $historyTestDir "display.log"
+
+    [PSCustomObject][ordered]@{
+        Datum                 = "2026-08-25"
+        Start                 = "08:00:00"
+        Ende                  = "16:30:00"
+        Brutto                = "08:30:00"
+        Pause_08_55_09_35     = "00:10:00"
+        Pause_11_55_12_45     = "00:20:00"
+        Pause_Manuell         = "00:00:00"
+        Pause_Gesamt          = "00:30:00"
+        Netto                 = "08:00:00"
+        Netto_Stunden_Dezimal = "8,00"
+        Status                = "Arbeit"
+        Notiz                 = "Vorher"
+        Alte_Spalte           = "bleibt"
+    } | Export-Csv -LiteralPath $script:CsvPath -Delimiter ";" -NoTypeInformation -Encoding UTF8
+
+    $historicalIntervals = @(
+        [PSCustomObject]@{ Kind = "Auto"; Key = "Morning"; Label = "FrÃ¼hstÃ¼ck"; Start = "09:00"; End = "09:10" },
+        [PSCustomObject]@{ Kind = "Manual"; Key = "Manual"; Label = "Manuell"; Start = "12:00"; End = "12:15" }
+    )
+
+    Save-HistoricalWorkDay `
+        -Date ([datetime]"2026-08-25") `
+        -StartTime "07:30" `
+        -EndTime "16:00" `
+        -PauseIntervals $historicalIntervals `
+        -Note "Korrigiert" `
+        -Settings (New-ArbeitszeitDefaultSettings) | Out-Null
+
+    $historyRows = @(Import-Csv -LiteralPath $script:CsvPath -Delimiter ";")
+    Assert-Equal 1 $historyRows.Count "RÃ¼ckwirkendes Bearbeiten erzeugt keine doppelte Tageszeile"
+    Assert-Equal "bleibt" ([string]$historyRows[0].Alte_Spalte) "RÃ¼ckwirkendes Bearbeiten erhÃ¤lt unbekannte Altspalten"
+    Assert-Equal "08:30:00" ([string]$historyRows[0].Brutto) "Historische Bruttozeit wird aus Von-bis neu berechnet"
+    Assert-Equal "00:25:00" ([string]$historyRows[0].Pause_Gesamt) "Historische Pausen werden aus Intervallen neu berechnet"
+    Assert-Equal "08:05:00" ([string]$historyRows[0].Netto) "Historische Nettozeit wird neu berechnet"
+    Assert-Equal "Korrigiert" ([string]$historyRows[0].Notiz) "Historische Notiz wird aktualisiert"
+
+    Save-HistoricalWorkDay `
+        -Date ([datetime]"2026-08-26") `
+        -StartTime "08:00" `
+        -EndTime "16:30" `
+        -PauseIntervals @() `
+        -Note "Nachgetragen" `
+        -Settings (New-ArbeitszeitDefaultSettings) | Out-Null
+
+    $historyRows = @(Import-Csv -LiteralPath $script:CsvPath -Delimiter ";")
+    Assert-Equal 2 $historyRows.Count "Ein fehlender vergangener Arbeitstag kann nachgetragen werden"
+
+    Add-WorkEntryLocal `
+        -Hours 1.5 `
+        -Description "Dokumentation nachgetragen" `
+        -Project "4711" `
+        -Date ([datetime]"2026-08-26")
+
+    $historicalActivities = @(Get-WorkEntriesForDate -DateText "2026-08-26")
+    Assert-Equal 1 $historicalActivities.Count "TÃ¤tigkeit kann fÃ¼r einen vergangenen Tag nachgetragen werden"
+    Assert-Equal "2026-08-26" ([string]$historicalActivities[0].Datum) "Nachgetragene TÃ¤tigkeit behÃ¤lt das ausgewÃ¤hlte Datum"
+    $activityDayRow = @(Import-Csv -LiteralPath $script:CsvPath -Delimiter ";" | Where-Object { $_.Datum -eq "2026-08-26" })[0]
+    Assert-Equal "1" ([string]$activityDayRow.Taetigkeiten_Anzahl) "TÃ¤tigkeitsanzahl wird in der Arbeitszeit-CSV aktualisiert"
+    Assert-Equal "1,50" ([string]$activityDayRow.Taetigkeiten_Stunden) "TÃ¤tigkeitsstunden werden in der Arbeitszeit-CSV aktualisiert"
+}
+finally {
+    if (Test-Path -LiteralPath $historyTestDir) {
+        Remove-Item -LiteralPath $historyTestDir -Recurse -Force
+    }
+}
+
+Import-FunctionsFromFile -Path $displayPath -Names @(
     "Convert-DurationTextToSeconds",
     "Get-WorkDate",
     "Get-ExpectedWorkSeconds",
@@ -426,7 +521,7 @@ Assert-True -Condition $html.Contains("Pausenzeiten") -Message "Bericht enthält
 Assert-True -Condition $html.Contains("berstunden gesamt") -Message "Bericht enthält Gesamtüberstunden"
 Assert-True -Condition $html.Contains($monthData.MonthName) -Message "Bericht enthält die Monatsübersicht"
 
-Import-FunctionsFromFile -Path $displayPath -Names @("Open-WeekWindow", "Open-CorrectionWindow")
+Import-FunctionsFromFile -Path $displayPath -Names @("Open-WeekWindow", "Select-CorrectionDate", "Open-CorrectionWindow")
 
 function Get-WeekReportData {
     return [PSCustomObject]@{
@@ -465,6 +560,7 @@ function Get-ThemePalette {
     param([string]$Theme)
     return [PSCustomObject]@{ Window = "#FFFFFF"; Card = "#FFFFFF"; Border = "#CCCCCC"; Primary = "#111111"; Secondary = "#666666"; Soft = "#EEEEEE" }
 }
+function Get-UiSettings { return New-ArbeitszeitDefaultSettings }
 function Convert-FromXaml {
     param([string]$Xaml)
     [xml]$Xaml | Out-Null
@@ -516,6 +612,16 @@ catch {
     }
 }
 
+try {
+    Select-CorrectionDate -Owner $null
+    throw "Datumsauswahl-XAML wurde nicht geprüft."
+}
+catch {
+    if ($_.Exception.Message -ne "__XAML_VALID__") {
+        throw
+    }
+}
+
 $tokens = $null
 $errors = $null
 $displayAst = [System.Management.Automation.Language.Parser]::ParseFile($displayPath, [ref]$tokens, [ref]$errors)
@@ -537,6 +643,7 @@ Invoke-Expression $mainXamlAssignment.Extent.Text
 [xml]$mainXaml | Out-Null
 Assert-True -Condition $true -Message "Hauptfenster-XAML ist gültig"
 Assert-True -Condition $mainXaml.Contains('TextElement.Foreground="{TemplateBinding Foreground}"') -Message "Hauptfenster-Buttons übernehmen ihre Textfarbe sichtbar"
+Assert-True -Condition $mainXaml.Contains('x:Name="ActivityDatePicker"') -Message "Tätigkeiten besitzen eine Datumsauswahl für rückwirkende Einträge"
 
 $dialogStylesAssignment = $displayAst.FindAll(
     {
@@ -656,6 +763,8 @@ Assert-True -Condition ($disabledDialogRatio -ge 4.5) -Message "Deaktivierte Dia
 $displaySource = Get-Content -LiteralPath $displayPath -Raw
 Assert-True -Condition $displaySource.Contains('x:Name="PauseSummaryText"') -Message "Korrekturfenster zeigt die live berechnete Pausensumme"
 Assert-True -Condition $displaySource.Contains('x:Name="EmptyPausePanel"') -Message "Korrekturfenster besitzt einen klaren Leerzustand"
+Assert-True -Condition $displaySource.Contains('Save-HistoricalWorkDay') -Message "Korrekturfenster speichert vergangene Arbeitstage"
+Assert-True -Condition (-not $displaySource.Contains('SelectedDate.HasValue')) -Message "WPF-Datumsauswahl wird als DateTime statt als Nullable ausgewertet"
 
 $contrastPairs = @(
     @("#005BBB", "#FFFFFF", "Primärbuttons"),

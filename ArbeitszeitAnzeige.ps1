@@ -651,6 +651,227 @@ function Convert-ToCsvRow {
     return [PSCustomObject]$normalized
 }
 
+function Get-DisplayPauseCsvColumnName {
+    param($Pause)
+
+    if ([string]$Pause.Key -eq "Morning") {
+        return "Pause_08_55_09_35"
+    }
+
+    if ([string]$Pause.Key -eq "Noon") {
+        return "Pause_11_55_12_45"
+    }
+
+    $key = Convert-ArbeitszeitPauseKey -Key ([string]$Pause.Key) -Fallback ([string]$Pause.Label)
+    return "Pause_$key"
+}
+
+function Get-WorkCsvRowForDate {
+    param(
+        [datetime]$Date
+    )
+
+    return @(Read-WorkCsvRows | Where-Object {
+        $rowDate = Get-WorkDate -DateText ([string]$_.Datum)
+        $null -ne $rowDate -and $rowDate.Date -eq $Date.Date
+    } | Select-Object -Last 1)
+}
+
+function Get-HistoricalWorkDayValues {
+    param(
+        [datetime]$Date
+    )
+
+    $rowResult = @(Get-WorkCsvRowForDate -Date $Date)
+    $row = if ($rowResult.Count -gt 0) { $rowResult[0] } else { $null }
+    $pauseText = if ($null -ne $row) { [string]$row.Pausen_Zeitraeume } else { "" }
+    $intervals = @(ConvertFrom-PauseIntervalsText -Text $pauseText -Date $Date.Date)
+
+    return [PSCustomObject][ordered]@{
+        HasRecord           = ($null -ne $row)
+        Date                = $Date.ToString("yyyy-MM-dd")
+        StartTime           = if ($null -ne $row) { [string]$row.Start } else { "" }
+        EndTime             = if ($null -ne $row) { [string]$row.Ende } else { "" }
+        TotalPauseSeconds   = if ($null -ne $row) { Convert-DurationTextToSeconds ([string]$row.Pause_Gesamt) } else { 0.0 }
+        PauseIntervalsText  = $pauseText
+        PauseIntervals      = $intervals
+        Note                = if ($null -ne $row) { [string]$row.Notiz } else { "" }
+        Settings            = Get-UiSettings
+    }
+}
+
+function Save-HistoricalWorkDay {
+    param(
+        [datetime]$Date,
+        [string]$StartTime,
+        [string]$EndTime,
+        [object[]]$PauseIntervals,
+        [string]$Note,
+        $Settings = (Get-UiSettings)
+    )
+
+    if ($Date.Date -ge (Get-Date).Date) {
+        throw "Nur vergangene Tage können direkt in der Historie gespeichert werden."
+    }
+
+    $normalizedStart = Convert-ToTimeText -TimeText $StartTime
+    $normalizedEnd = Convert-ToTimeText -TimeText $EndTime
+
+    if ([string]::IsNullOrWhiteSpace($normalizedStart) -or [string]::IsNullOrWhiteSpace($normalizedEnd)) {
+        throw "Start und Ende müssen im Format HH:mm oder HH:mm:ss angegeben werden."
+    }
+
+    $start = [datetime]::ParseExact(
+        ($Date.ToString("yyyy-MM-dd") + " " + $normalizedStart),
+        "yyyy-MM-dd HH:mm:ss",
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    $end = [datetime]::ParseExact(
+        ($Date.ToString("yyyy-MM-dd") + " " + $normalizedEnd),
+        "yyyy-MM-dd HH:mm:ss",
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+
+    if ($end -le $start) {
+        throw "Das Arbeitsende muss nach dem Arbeitsbeginn liegen."
+    }
+
+    $datedIntervals = @()
+
+    foreach ($sourceInterval in @($PauseIntervals)) {
+        $pauseStartText = Convert-ToTimeText -TimeText ([string]$sourceInterval.Start)
+        $pauseEndText = Convert-ToTimeText -TimeText ([string]$sourceInterval.End)
+
+        if ([string]::IsNullOrWhiteSpace($pauseStartText) -or [string]::IsNullOrWhiteSpace($pauseEndText)) {
+            continue
+        }
+
+        $datedIntervals += [PSCustomObject][ordered]@{
+            Kind  = [string]$sourceInterval.Kind
+            Key   = [string]$sourceInterval.Key
+            Label = [string]$sourceInterval.Label
+            Start = [datetime]::ParseExact(
+                ($Date.ToString("yyyy-MM-dd") + " " + $pauseStartText),
+                "yyyy-MM-dd HH:mm:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            ).ToString("o")
+            End   = [datetime]::ParseExact(
+                ($Date.ToString("yyyy-MM-dd") + " " + $pauseEndText),
+                "yyyy-MM-dd HH:mm:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            ).ToString("o")
+        }
+    }
+
+    $mergedIntervals = @(Merge-PauseIntervals -Intervals $datedIntervals)
+    $manualPauseSeconds = 0.0
+    $autoPauseByKey = @{}
+    $totalPauseSeconds = 0.0
+
+    foreach ($interval in $mergedIntervals) {
+        $pauseStart = Get-PauseIntervalDateTime -Interval $interval -Name "Start"
+        $pauseEnd = Get-PauseIntervalDateTime -Interval $interval -Name "End"
+
+        if ($null -eq $pauseStart -or $null -eq $pauseEnd -or $pauseEnd -le $pauseStart) {
+            continue
+        }
+
+        if ($pauseStart -lt $start -or $pauseEnd -gt $end) {
+            throw "Alle Pausen müssen innerhalb der Arbeitszeit liegen."
+        }
+
+        $seconds = ($pauseEnd - $pauseStart).TotalSeconds
+        $totalPauseSeconds += $seconds
+
+        if ([string]$interval.Kind -eq "Auto") {
+            $key = [string]$interval.Key
+
+            if (-not $autoPauseByKey.ContainsKey($key)) {
+                $autoPauseByKey[$key] = 0.0
+            }
+
+            $autoPauseByKey[$key] = [double]$autoPauseByKey[$key] + $seconds
+        }
+        else {
+            $manualPauseSeconds += $seconds
+        }
+    }
+
+    $grossSeconds = ($end - $start).TotalSeconds
+    $netSeconds = [math]::Max(0, $grossSeconds - $totalPauseSeconds)
+    $activitySummary = Get-WorkEntrySummaryForDate -DateText $Date.ToString("yyyy-MM-dd")
+    $deCulture = [System.Globalization.CultureInfo]::GetCultureInfo("de-DE")
+    $pauseWindows = @(Get-ArbeitszeitPauseWindows -Settings $Settings -IncludeDisabled)
+    $pauseColumns = @($pauseWindows | ForEach-Object { Get-DisplayPauseCsvColumnName -Pause $_ })
+    $columns = @(
+        "Datum", "Start", "Ende", "Brutto"
+    ) + $pauseColumns + @(
+        "Pause_Manuell", "Pause_Gesamt", "Netto", "Netto_Stunden_Dezimal",
+        "Taetigkeiten_Stunden", "Taetigkeiten_Anzahl", "Taetigkeiten_Details",
+        "Status", "Notiz", "Pausen_Zeitraeume"
+    )
+    $rows = @(Read-WorkCsvRows)
+
+    foreach ($existingRow in $rows) {
+        foreach ($column in @($existingRow.PSObject.Properties.Name)) {
+            if ($columns -notcontains $column) {
+                $columns += $column
+            }
+        }
+    }
+
+    $existingForDate = @($rows | Where-Object {
+        $rowDate = Get-WorkDate -DateText ([string]$_.Datum)
+        $null -ne $rowDate -and $rowDate.Date -eq $Date.Date
+    } | Select-Object -Last 1)
+    $row = Convert-ToCsvRow -Row $(if ($existingForDate.Count -gt 0) { $existingForDate[0] } else { $null }) -Columns $columns
+
+    $row.Datum = $Date.ToString("yyyy-MM-dd")
+    $row.Start = $normalizedStart
+    $row.Ende = $normalizedEnd
+    $row.Brutto = Format-Duration $grossSeconds
+
+    foreach ($pauseWindow in $pauseWindows) {
+        $column = Get-DisplayPauseCsvColumnName -Pause $pauseWindow
+        $seconds = if ($autoPauseByKey.ContainsKey([string]$pauseWindow.Key)) { [double]$autoPauseByKey[[string]$pauseWindow.Key] } else { 0.0 }
+        $row.$column = Format-Duration $seconds
+    }
+
+    $row.Pause_Manuell = Format-Duration $manualPauseSeconds
+    $row.Pause_Gesamt = Format-Duration $totalPauseSeconds
+    $row.Netto = Format-Duration $netSeconds
+    $row.Netto_Stunden_Dezimal = ($netSeconds / 3600).ToString("N2", $deCulture)
+    $row.Taetigkeiten_Stunden = ([double]$activitySummary.Hours).ToString("N2", $deCulture)
+    $row.Taetigkeiten_Anzahl = [string]$activitySummary.Count
+    $row.Taetigkeiten_Details = [string]$activitySummary.Details
+    $row.Status = "Arbeit"
+    $row.Notiz = [string]$Note
+    $row.Pausen_Zeitraeume = Format-PauseIntervals -Intervals $mergedIntervals
+
+    $remainingRows = @($rows | Where-Object {
+        $rowDate = Get-WorkDate -DateText ([string]$_.Datum)
+        $null -eq $rowDate -or $rowDate.Date -ne $Date.Date
+    } | ForEach-Object { Convert-ToCsvRow -Row $_ -Columns $columns })
+    $allRows = @($remainingRows) + @($row)
+    $tmpPath = $CsvPath + ".tmp"
+    $backupPath = $CsvPath + ".bak"
+
+    if (Test-Path $CsvPath) {
+        Copy-Item -LiteralPath $CsvPath -Destination $backupPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $allRows |
+        Sort-Object {
+            $rowDate = Get-WorkDate -DateText ([string]$_.Datum)
+            if ($null -eq $rowDate) { [datetime]::MaxValue } else { $rowDate }
+        } |
+        Select-Object $columns |
+        Export-Csv -LiteralPath $tmpPath -Delimiter ";" -NoTypeInformation -Encoding UTF8
+
+    Move-Item -LiteralPath $tmpPath -Destination $CsvPath -Force
+    return $row
+}
+
 function Update-WorkCsvActivityColumns {
     if (!(Test-Path $CsvPath)) {
         return
@@ -714,14 +935,16 @@ function Add-WorkEntryLocal {
     param(
         [double]$Hours,
         [string]$Description,
-        [string]$Project
+        [string]$Project,
+        [datetime]$Date = (Get-Date)
     )
 
     $now = Get-Date
+    $recordedAt = $Date.Date.Add($now.TimeOfDay)
     $entry = [PSCustomObject][ordered]@{
         Id           = [guid]::NewGuid().ToString()
-        Datum        = $now.ToString("yyyy-MM-dd")
-        ErfasstAm    = $now.ToString("o")
+        Datum        = $Date.ToString("yyyy-MM-dd")
+        ErfasstAm    = $recordedAt.ToString("o")
         Stunden      = [math]::Round($Hours, 2)
         Projekt      = $Project.Trim()
         Beschreibung = $Description.Trim()
@@ -740,7 +963,8 @@ function Update-WorkEntryLocal {
         [string]$Id,
         [double]$Hours,
         [string]$Description,
-        [string]$Project
+        [string]$Project,
+        [datetime]$Date = (Get-Date)
     )
 
     if ([string]::IsNullOrWhiteSpace($Id)) {
@@ -751,6 +975,7 @@ function Update-WorkEntryLocal {
 
     foreach ($entry in $entries) {
         if ([string]$entry.Id -eq $Id) {
+            $entry.Datum = $Date.ToString("yyyy-MM-dd")
             $entry.Stunden = [math]::Round($Hours, 2)
             $entry.Projekt = $Project.Trim()
             $entry.Beschreibung = $Description.Trim()
@@ -781,6 +1006,14 @@ function Remove-WorkEntryLocal {
 function Get-TodayWorkEntries {
     $today = (Get-Date).ToString("yyyy-MM-dd")
     return @(Read-WorkEntries | Where-Object { [string]$_.Datum -eq $today } | Sort-Object ErfasstAm)
+}
+
+function Get-WorkEntriesForSelectedDate {
+    param(
+        [datetime]$Date
+    )
+
+    return @(Get-WorkEntriesForDate -DateText $Date.ToString("yyyy-MM-dd") | Sort-Object ErfasstAm)
 }
 
 function Get-TodayWorkEntrySummary {
@@ -2033,30 +2266,133 @@ function Register-CorrectionPauseRefresh {
     })
 }
 
-function Open-CorrectionWindow {
+function Select-CorrectionDate {
     param(
         $Owner
     )
 
-    $values = Get-LiveValues
+    $settings = Get-UiSettings
+    $palette = Get-ThemePalette -Theme ([string]$settings.Theme)
+    $xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Arbeitstag auswählen"
+        Width="440"
+        Height="285"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="$($palette.Window)"
+        FontFamily="Segoe UI">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="16"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="Arbeitstag bearbeiten" FontSize="24" FontWeight="SemiBold" Foreground="$($palette.Primary)"/>
+            <TextBlock Text="Wähle heute oder einen vergangenen Tag aus." Margin="0,5,0,0" Foreground="$($palette.Secondary)"/>
+        </StackPanel>
+        <Border Grid.Row="2" Padding="18" Background="$($palette.Card)" BorderBrush="$($palette.Border)" BorderThickness="1" CornerRadius="18">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="165"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="DATUM" Foreground="$($palette.Secondary)" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <DatePicker x:Name="WorkDatePicker" Grid.Column="1" Height="34" SelectedDateFormat="Short"/>
+            </Grid>
+        </Border>
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="CancelButton" Content="Abbrechen" Margin="0,0,10,0"/>
+            <Button x:Name="SaveButton" Content="Weiter"/>
+        </StackPanel>
+    </Grid>
+</Window>
+"@
 
-    if (-not $values.HasState) {
+    $dialog = Convert-FromXaml $xaml
+    Add-DialogStyles $dialog
+    Apply-DialogButtonStyles $dialog
+    $dialog.Owner = $Owner
+    $picker = $dialog.FindName("WorkDatePicker")
+    $picker.SelectedDate = (Get-Date).Date
+    $picker.DisplayDateEnd = (Get-Date).Date
+    $picker.Background = New-Brush "#FFFFFF"
+    $picker.Foreground = New-Brush "#1C1C1E"
+
+    if (Test-Path $IconPath) {
+        try { $dialog.Icon = New-Object System.Windows.Media.Imaging.BitmapImage([Uri]$IconPath) } catch {}
+    }
+
+    $dialog.FindName("CancelButton").Add_Click({ $dialog.DialogResult = $false })
+    $dialog.FindName("SaveButton").Add_Click({
+        if ($null -eq $picker.SelectedDate) {
+            Show-Warning "Bitte ein Datum auswählen."
+            return
+        }
+
+        if ($picker.SelectedDate.Date -gt (Get-Date).Date) {
+            Show-Warning "Ein zukünftiger Arbeitstag kann nicht bearbeitet werden."
+            return
+        }
+
+        $dialog.Tag = $picker.SelectedDate.Date
+        $dialog.DialogResult = $true
+    })
+
+    if ($dialog.ShowDialog() -eq $true -and $null -ne $dialog.Tag) {
+        return [datetime]$dialog.Tag
+    }
+
+    return $null
+}
+
+function Open-CorrectionWindow {
+    param(
+        $Owner,
+        [datetime]$WorkDate = [datetime]::MinValue
+    )
+
+    $liveValues = Get-LiveValues
+
+    if ($WorkDate -eq [datetime]::MinValue) {
+        $WorkDate = Get-WorkDate -DateText ([string]$liveValues.Date)
+
+        if ($null -eq $WorkDate) {
+            $WorkDate = (Get-Date).Date
+        }
+    }
+
+    $WorkDate = $WorkDate.Date
+    $isToday = $WorkDate -eq (Get-Date).Date
+    $values = if ($isToday) { $liveValues } else { Get-HistoricalWorkDayValues -Date $WorkDate }
+
+    if ($isToday -and -not $values.HasState) {
         Show-Info "Es gibt noch keinen Tagesstand. Starte den Tracker einmal oder warte kurz."
         return
     }
 
-    $state = Read-State
+    $state = if ($isToday) { Read-State } else { $null }
     $settings = $values.Settings
     $palette = Get-ThemePalette -Theme ([string]$settings.Theme)
-    $workDate = Get-WorkDate -DateText ([string]$values.Date)
-
-    if ($null -eq $workDate) {
-        $workDate = (Get-Date).Date
+    $workDate = $WorkDate
+    $dialogTitle = if ($isToday) { "Heute korrigieren" } else { "Arbeitstag korrigieren" }
+    $dialogSubtitle = if ($isToday) {
+        "Arbeitsbeginn und exakte Pausenintervalle für den aktuellen Tag."
+    }
+    else {
+        "Arbeitszeit, Pausen und Notiz für $($workDate.ToString('dd.MM.yyyy'))."
     }
 
     $existingIntervals = @()
 
-    if ($null -ne $state -and $state.PSObject.Properties.Name -contains "PauseIntervals") {
+    if (-not $isToday -and $values.PSObject.Properties.Name -contains "PauseIntervals") {
+        $existingIntervals = @($values.PauseIntervals | Where-Object { $null -ne $_ })
+    }
+    elseif ($null -ne $state -and $state.PSObject.Properties.Name -contains "PauseIntervals") {
         $existingIntervals = @($state.PauseIntervals | Where-Object { $null -ne $_ })
     }
 
@@ -2085,7 +2421,7 @@ function Open-CorrectionWindow {
     $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Heute korrigieren"
+        Title="$dialogTitle"
         Width="720"
         Height="700"
         MinWidth="650"
@@ -2097,21 +2433,30 @@ function Open-CorrectionWindow {
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="20">
             <StackPanel Margin="4,0,4,18">
-                <TextBlock Text="Heute korrigieren" FontSize="26" FontWeight="SemiBold" Foreground="$($palette.Primary)"/>
-                <TextBlock Text="Arbeitsbeginn und exakte Pausenintervalle für den aktuellen Tag." Margin="0,5,0,0" Foreground="$($palette.Secondary)"/>
+                <TextBlock Text="$dialogTitle" FontSize="26" FontWeight="SemiBold" Foreground="$($palette.Primary)"/>
+                <TextBlock Text="$dialogSubtitle" Margin="0,5,0,0" Foreground="$($palette.Secondary)"/>
             </StackPanel>
 
             <Border Padding="20" Background="$($palette.Card)" BorderBrush="$($palette.Border)" BorderThickness="1" CornerRadius="22">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="180"/>
+                        <ColumnDefinition Width="130"/>
+                        <ColumnDefinition Width="12"/>
+                        <ColumnDefinition Width="130"/>
                     </Grid.ColumnDefinitions>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="ARBEITSBEGINN" Foreground="$($palette.Secondary)" FontSize="11" FontWeight="SemiBold"/>
                         <TextBlock Text="Die Startzeit kann unabhängig von den Pausen angepasst werden." Margin="0,5,24,0" Foreground="$($palette.Secondary)" FontSize="12" TextWrapping="Wrap"/>
                     </StackPanel>
-                    <TextBox x:Name="StartBox" Grid.Column="1" FontSize="15" ToolTip="Format HH:mm oder HH:mm:ss"/>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="VON" Foreground="$($palette.Secondary)" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                        <TextBox x:Name="StartBox" FontSize="15" ToolTip="Format HH:mm oder HH:mm:ss"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="3">
+                        <TextBlock Text="BIS" Foreground="$($palette.Secondary)" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                        <TextBox x:Name="EndBox" FontSize="15" ToolTip="Format HH:mm oder HH:mm:ss"/>
+                    </StackPanel>
                 </Grid>
             </Border>
 
@@ -2207,9 +2552,9 @@ function Open-CorrectionWindow {
     }
     $addPauseButton.Style = $dialog.Resources["DialogSecondaryButton"]
 
-    foreach ($name in @("StartBox", "NoteBox")) {
+    foreach ($name in @("StartBox", "EndBox", "NoteBox")) {
         $textBox = $dialog.FindName($name)
-        Set-CorrectionInputAppearance -Control $textBox -TimeMaxLength $(if ($name -eq "StartBox") { 8 } else { 0 })
+        Set-CorrectionInputAppearance -Control $textBox -TimeMaxLength $(if ($name -in @("StartBox", "EndBox")) { 8 } else { 0 })
     }
 
     function Add-CorrectionPauseRow {
@@ -2347,6 +2692,15 @@ function Open-CorrectionWindow {
     $workStartBox = $dialog.FindName("StartBox")
     $workStartBox.Text = $values.StartTime
     $workStartBox.Add_GotKeyboardFocus({ param($sender, $eventArgs) $sender.SelectAll() })
+    $workEndBox = $dialog.FindName("EndBox")
+    $workEndBox.Text = $values.EndTime
+    $workEndBox.Add_GotKeyboardFocus({ param($sender, $eventArgs) $sender.SelectAll() })
+
+    if ($isToday) {
+        $workEndBox.IsReadOnly = $true
+        $workEndBox.ToolTip = "Das Ende des laufenden Tages wird automatisch vom Tracker gesetzt."
+    }
+
     $dialog.FindName("NoteBox").Text = [string]$values.Note
 
     if ($pauseRows.Count -eq 0 -and [double]$values.TotalPauseSeconds -gt 0) {
@@ -2354,7 +2708,20 @@ function Open-CorrectionWindow {
     }
 
     $dialog.FindName("AddPauseButton").Add_Click({
-        $now = Get-Date
+        $now = if ($isToday) { Get-Date } else {
+            $parsedEndText = Convert-ToTimeText -TimeText ([string]$workEndBox.Text)
+
+            if ([string]::IsNullOrWhiteSpace($parsedEndText)) {
+                $workDate.AddHours(12)
+            }
+            else {
+                [datetime]::ParseExact(
+                    ($workDate.ToString("yyyy-MM-dd") + " " + $parsedEndText),
+                    "yyyy-MM-dd HH:mm:ss",
+                    [System.Globalization.CultureInfo]::InvariantCulture
+                )
+            }
+        }
         $start = $now.AddMinutes(-15)
 
         if ($start.Date -ne $now.Date) {
@@ -2377,9 +2744,33 @@ function Open-CorrectionWindow {
         param($sender, $eventArgs)
 
         $startTime = Convert-ToTimeText $dialog.FindName("StartBox").Text
+        $endTime = Convert-ToTimeText $dialog.FindName("EndBox").Text
 
         if ([string]::IsNullOrWhiteSpace($startTime)) {
             Show-Warning "Bitte die Startzeit als HH:mm oder HH:mm:ss eingeben."
+            return
+        }
+
+        if (-not $isToday -and [string]::IsNullOrWhiteSpace($endTime)) {
+            Show-Warning "Bitte die Endzeit als HH:mm oder HH:mm:ss eingeben."
+            return
+        }
+
+        $workStart = [datetime]::ParseExact(
+            ($workDate.ToString("yyyy-MM-dd") + " " + $startTime),
+            "yyyy-MM-dd HH:mm:ss",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+        $workEnd = if ($isToday) { Get-Date } else {
+            [datetime]::ParseExact(
+                ($workDate.ToString("yyyy-MM-dd") + " " + $endTime),
+                "yyyy-MM-dd HH:mm:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+
+        if ($workEnd -le $workStart) {
+            Show-Warning "Das Arbeitsende muss nach dem Arbeitsbeginn liegen."
             return
         }
 
@@ -2418,8 +2809,13 @@ function Open-CorrectionWindow {
                 return
             }
 
-            if ($to -gt $now) {
+            if ($to -gt $workEnd) {
                 Show-Warning "Eine Pause kann nicht in der Zukunft enden."
+                return
+            }
+
+            if ($from -lt $workStart) {
+                Show-Warning "Alle Pausen müssen innerhalb der Arbeitszeit liegen."
                 return
             }
 
@@ -2447,7 +2843,7 @@ function Open-CorrectionWindow {
 
         if ($correctedIntervals.Count -eq 0 -and [double]$values.TotalPauseSeconds -gt 0) {
             $answer = [System.Windows.MessageBox]::Show(
-                "Alle vorhandenen Pausen werden für heute entfernt. Fortfahren?",
+                "Alle vorhandenen Pausen werden für diesen Tag entfernt. Fortfahren?",
                 "Arbeitszeit",
                 [System.Windows.MessageBoxButton]::YesNo,
                 [System.Windows.MessageBoxImage]::Warning
@@ -2469,6 +2865,18 @@ function Open-CorrectionWindow {
         $dialog.UpdateLayout()
 
         try {
+            if (-not $isToday) {
+                Save-HistoricalWorkDay `
+                    -Date $workDate `
+                    -StartTime $startTime `
+                    -EndTime $endTime `
+                    -PauseIntervals $correctedIntervals `
+                    -Note $dialog.FindName("NoteBox").Text `
+                    -Settings $settings | Out-Null
+                $dialog.Close()
+                return
+            }
+
             $commandId = Write-ControlCommand -Action "UpdateToday" -Values $commandValues -PassThru
             $timeoutSeconds = [math]::Min(65, [math]::Max(5, ([int]$settings.IntervalSeconds + 3)))
 
@@ -3241,8 +3649,15 @@ $mainXaml = @"
                 </Grid.ColumnDefinitions>
 
                 <Grid Grid.ColumnSpan="7">
-                    <TextBlock Text="TÄTIGKEITEN" Foreground="#6E6E73" FontSize="12" FontWeight="SemiBold"/>
-                    <TextBlock x:Name="ActivityStatusText" Text="0 Einträge · 0,00 h" HorizontalAlignment="Right" Foreground="#8E8E93" FontSize="12"/>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="12"/>
+                        <ColumnDefinition Width="135"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="TÄTIGKEITEN" Foreground="#6E6E73" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <DatePicker x:Name="ActivityDatePicker" Grid.Column="2" Height="30" SelectedDateFormat="Short" ToolTip="Tag für Tätigkeiten auswählen"/>
+                    <TextBlock x:Name="ActivityStatusText" Grid.Column="3" Text="0 Einträge · 0,00 h" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#8E8E93" FontSize="12"/>
                 </Grid>
 
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Projektnummer" Foreground="#8E8E93" FontSize="11" FontWeight="SemiBold"/>
@@ -3311,6 +3726,7 @@ $activityProjectBox = $mainWindow.FindName("ActivityProjectBox")
 $activitySaveButton = $mainWindow.FindName("ActivitySaveButton")
 $activityListPanel = $mainWindow.FindName("ActivityListPanel")
 $activityStatusText = $mainWindow.FindName("ActivityStatusText")
+$activityDatePicker = $mainWindow.FindName("ActivityDatePicker")
 $topMostBox = $mainWindow.FindName("TopMostBox")
 
 $script:SuppressTopMostSave = $false
@@ -3318,6 +3734,8 @@ $script:AllowWindowClose = $false
 $script:TrayHintShown = $false
 $script:TrayIcon = $null
 $script:EditingActivityId = ""
+$activityDatePicker.SelectedDate = (Get-Date).Date
+$activityDatePicker.DisplayDateEnd = (Get-Date).Date
 
 function Set-Brush {
     param(
@@ -3415,8 +3833,17 @@ function Reset-ActivityEditor {
     $activitySaveButton.Content = "Speichern"
 }
 
+function Get-SelectedActivityDate {
+    if ($null -ne $activityDatePicker -and $null -ne $activityDatePicker.SelectedDate) {
+        return $activityDatePicker.SelectedDate.Date
+    }
+
+    return (Get-Date).Date
+}
+
 function Refresh-ActivityList {
-    $entries = @(Get-TodayWorkEntries)
+    $selectedDate = Get-SelectedActivityDate
+    $entries = @(Get-WorkEntriesForSelectedDate -Date $selectedDate)
     $deCulture = [System.Globalization.CultureInfo]::GetCultureInfo("de-DE")
     $palette = Get-ThemePalette -Theme ([string](Get-UiSettings).Theme)
 
@@ -3424,7 +3851,7 @@ function Refresh-ActivityList {
 
     if ($entries.Count -eq 0) {
         $emptyText = New-Object System.Windows.Controls.TextBlock
-        $emptyText.Text = "Noch keine Tätigkeiten erfasst"
+        $emptyText.Text = "Für diesen Tag sind noch keine Tätigkeiten erfasst"
         $emptyText.Foreground = New-Brush $palette.Secondary
         $emptyText.FontSize = 12
         $emptyText.Margin = New-Object System.Windows.Thickness -ArgumentList 0, 2, 0, 0
@@ -3536,6 +3963,12 @@ function Load-ActivityIntoEditorById {
     }
 
     $item = $entry[0]
+    $entryDate = Get-WorkDate -DateText ([string]$item.Datum)
+
+    if ($null -ne $entryDate) {
+        $activityDatePicker.SelectedDate = $entryDate
+    }
+
     $script:EditingActivityId = [string]$item.Id
     $activityProjectBox.Text = [string]$item.Projekt
     $activityDescriptionBox.Text = [string]$item.Beschreibung
@@ -3585,7 +4018,8 @@ function Update-Ui {
     $pauseIntervalsText.Text = if ([string]::IsNullOrWhiteSpace([string]$values.PauseIntervalsText)) { "-" } else { [string]$values.PauseIntervalsText }
     $pauseIntervalsText.ToolTip = $pauseIntervalsText.Text
     $updatedText.Text = $values.UpdatedText
-    $activitySummary = Get-TodayWorkEntrySummary
+    $selectedActivityDate = Get-SelectedActivityDate
+    $activitySummary = Get-WorkEntrySummaryForDate -DateText $selectedActivityDate.ToString("yyyy-MM-dd")
     $activityStatusText.Text = "{0} Einträge · {1:N2} h" -f $activitySummary.Count, $activitySummary.Hours
     if ([string]::IsNullOrWhiteSpace($script:EditingActivityId)) {
         Refresh-ActivityList
@@ -3600,7 +4034,7 @@ function Update-Ui {
 
     $pauseButton.IsEnabled = $values.HasState -and -not $values.ManualPauseActive
     $resumeButton.IsEnabled = $values.HasState -and $values.ManualPauseActive
-    $editButton.IsEnabled = $values.HasState
+    $editButton.IsEnabled = $true
     $mainWindow.Topmost = [bool]$values.Settings.AlwaysOnTop
 
     if ($topMostBox.IsChecked -ne [bool]$values.Settings.AlwaysOnTop) {
@@ -3613,11 +4047,30 @@ function Update-Ui {
     Test-TargetNotification -Values $values
 }
 
+$activityDatePicker.Add_SelectedDateChanged({
+    if ($null -ne $activityDatePicker.SelectedDate -and $activityDatePicker.SelectedDate.Date -gt (Get-Date).Date) {
+        $activityDatePicker.SelectedDate = (Get-Date).Date
+        return
+    }
+
+    Reset-ActivityEditor
+    Refresh-ActivityList
+    $selectedDate = Get-SelectedActivityDate
+    $summary = Get-WorkEntrySummaryForDate -DateText $selectedDate.ToString("yyyy-MM-dd")
+    $activityStatusText.Text = "{0} Einträge · {1:N2} h" -f $summary.Count, $summary.Hours
+})
+
 $activitySaveButton.Add_Click({
     try {
         $hours = Convert-ToWorkEntryHours -Text ([string]$activityHoursBox.Text)
         $description = ([string]$activityDescriptionBox.Text).Trim()
         $project = ([string]$activityProjectBox.Text).Trim()
+        $activityDate = Get-SelectedActivityDate
+
+        if ($activityDate -gt (Get-Date).Date) {
+            Show-Warning "Tätigkeiten können nicht für einen zukünftigen Tag erfasst werden."
+            return
+        }
 
         if ($hours -le 0) {
             Show-Warning "Bitte Stunden eintragen, z.B. 1 oder 1,5."
@@ -3633,14 +4086,15 @@ $activitySaveButton.Add_Click({
         $activityStatusText.Text = "Tätigkeit wird gespeichert..."
 
         if ([string]::IsNullOrWhiteSpace($script:EditingActivityId)) {
-            Add-WorkEntryLocal -Hours $hours -Description $description -Project $project
+            Add-WorkEntryLocal -Hours $hours -Description $description -Project $project -Date $activityDate
         }
         else {
             Update-WorkEntryLocal `
                 -Id $script:EditingActivityId `
                 -Hours $hours `
                 -Description $description `
-                -Project $project
+                -Project $project `
+                -Date $activityDate
         }
 
         Reset-ActivityEditor
@@ -3669,7 +4123,12 @@ $resumeButton.Add_Click({
 })
 
 $editButton.Add_Click({
-    Open-CorrectionWindow -Owner $mainWindow
+    $selectedDate = Select-CorrectionDate -Owner $mainWindow
+
+    if ($null -ne $selectedDate) {
+        Open-CorrectionWindow -Owner $mainWindow -WorkDate $selectedDate
+        Update-Ui
+    }
 })
 
 $setupButton.Add_Click({

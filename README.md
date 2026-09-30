@@ -16,7 +16,8 @@ keinen Cloud-Dienst und kein Benutzerkonto.
 - automatische Pausenerkennung in definierbaren Zeitfenstern
 - absolute Pausenintervalle, zum Beispiel `09:01-09:12 (Frühstück)`
 - manuelle Pausen und nachträgliche Tageskorrekturen mit genauen Von-bis-Zeiten
-- Erfassung von Tätigkeiten und Projektbuchungen
+- rückwirkende Bearbeitung vergangener Arbeitstage inklusive Start, Ende, Pausen und Notiz
+- Erfassung und Nachtragung von Tätigkeiten und Projektbuchungen für ein auswählbares Datum
 - Tages-, Wochen- und Monatsstatistik
 - Monats- und Gesamtüberstundensaldo auf Basis der Wochenarbeitszeit
 - Export eines erweiterten Arbeitszeitberichts als HTML beziehungsweise PDF
@@ -52,8 +53,8 @@ Die Anzeige zeigt die aktuelle Nettoarbeitszeit, Pausen und den Fortschritt zum
 Tagesziel. Über die Oberfläche lassen sich:
 
 - manuelle Pausen starten und beenden,
-- der Arbeitsbeginn und einzelne Pausenintervalle des aktuellen Tages korrigieren,
-- Tätigkeiten erfassen,
+- Arbeitsbeginn, Arbeitsende und einzelne Pausenintervalle für heute oder einen vergangenen Tag korrigieren,
+- Tätigkeiten für heute oder rückwirkend für einen ausgewählten Tag erfassen,
 - Tages- und Wochenziele ändern,
 - Start-Offset, Messintervall, Idle-Schwelle und Pausenfenster konfigurieren sowie
 - Wochen- und Monatsberichte erzeugen.
@@ -67,6 +68,12 @@ Pause besitzt eine Kategorie sowie eine genaue Von- und Bis-Zeit. Mehrere
 Pausen können hinzugefügt oder einzeln entfernt werden; überlappende und in der
 Zukunft endende Intervalle werden abgewiesen. Die Dauerfelder in der CSV werden
 anschließend automatisch aus diesen Zeiträumen berechnet.
+
+Über **Korrigieren** wird zuerst der gewünschte Arbeitstag ausgewählt. Vergangene
+Tage können vollständig geändert oder, falls sie noch fehlen, neu angelegt
+werden. Start, Ende, Pausen, Nettozeit und Überstundenberichte werden danach
+automatisch neu berechnet. Im Bereich **Tätigkeiten** bestimmt die Datumsauswahl,
+für welchen Tag neue Projekt- und Tätigkeitszeiten gespeichert werden.
 
 ## Berichte und Überstunden
 
